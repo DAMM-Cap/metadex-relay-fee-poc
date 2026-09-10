@@ -1,0 +1,3 @@
+[submodule "vendor/metadex-public"]
+	path = vendor/metadex-public
+	url = https://github.com/dromos-labs/metadex-public.git
