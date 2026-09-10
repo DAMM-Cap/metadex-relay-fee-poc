@@ -4,6 +4,7 @@ pragma solidity 0.8.36;
 import {Script} from 'forge-std/Script.sol';
 
 import {FeeConverter} from '../src/FeeConverter.sol';
+import {FeeCompounder} from '../src/FeeCompounder.sol';
 import {RootMessageOrchestrator} from 'V3/bridge/RootMessageOrchestrator.sol';
 import {VeArtProxy} from 'V3/art/VeArtProxy.sol';
 import {VotingEscrow} from 'V3/core/VotingEscrow.sol';
@@ -40,7 +41,8 @@ contract DeployRelayPoc is Script {
   address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
   uint256 internal constant MANAGEMENT_FEE_BPS = 1_000;
   uint128 internal constant SEED_AMOUNT = 10_000e18;
-  /// @dev Mirrors `RelayRoles.CONVERTER` (an abstract contract, so its constants are not reachable via `type()`).
+  /// @dev Mirror `RelayRoles` bits (an abstract contract, so its constants are not reachable via `type()`).
+  uint256 internal constant COMPOUNDER_ROLE = 1 << 2;
   uint256 internal constant CONVERTER_ROLE = 1 << 3;
 
   error InvalidActor();
@@ -48,6 +50,7 @@ contract DeployRelayPoc is Script {
   error UnexpectedChainId(uint256 actual);
   error RelaySmokeFailed(address relay);
   error ConverterRoleMissing(address converter);
+  error CompounderRoleMissing(address compounder);
 
   struct Actors {
     address deployer;
@@ -63,8 +66,10 @@ contract DeployRelayPoc is Script {
     address voter;
     address vpm;
     address relayFactory;
-    address relay;
     address feeConverter;
+    address feeCompounder;
+    address relay;
+    address compounderRelay;
     address manager;
     address keeper;
     address strategist;
@@ -188,6 +193,10 @@ contract DeployRelayPoc is Script {
       IFactoryRegistry(address(new FactoryRegistryStub())), USDC, actors.manager, MANAGEMENT_FEE_BPS
     );
 
+    FeeCompounder feeCompounder = new FeeCompounder(
+      IFactoryRegistry(address(new FactoryRegistryStub())), actors.manager, MANAGEMENT_FEE_BPS
+    );
+
     // TOKEN transfers stay gated until one week after migration opens. The seed stake below routes TOKEN through
     // the non-exempt RelayFactory, so advance the clock to the enable time before any relay is seeded.
     vm.warp(uint256(migrationOpen) + 1 weeks);
@@ -227,6 +236,40 @@ contract DeployRelayPoc is Script {
       revert ConverterRoleMissing(address(feeConverter));
     }
 
+    // A manager picks one yield path per Relay, so the compounder gets its own single-entrypoint Relay: it holds
+    // COMPOUNDER (not CONVERTER), takes its fee in TOKEN, and compounds the net into backing.
+    token.approve(address(relayFactory), SEED_AMOUNT);
+    (address compounderRelay,) = relayFactory.createMaxiRelay(IRelayFactory.CreateParams({
+      admin: actors.deployer,
+      keeper: actors.keeper,
+      voter: actors.strategist,
+      compounder: address(feeCompounder),
+      converter: address(0),
+      bootstrapOwner: actors.treasury,
+      rewardToken: USDC,
+      entrypointVetoer: address(0),
+      seedAmount: SEED_AMOUNT,
+      isPermanent: true,
+      ytTransferable: false,
+      stakingWeeks: 0,
+      salt: keccak256('metadex-relay-fee-poc-compounder'),
+      config: IRelay.RelayConfig({
+        tokenId: 0,
+        minDeposit: 1e18,
+        keeperWindow: 1 days,
+        minWithdrawal: 1e18,
+        entrypointTimelock: 2 days,
+        lockWeeks: 0,
+        evacuationWindow: 7 days,
+        name: 'DAMM Relay',
+        symbol: 'dREL'
+      })
+    }));
+    if (!relayFactory.isRelay(compounderRelay)) revert RelaySmokeFailed(compounderRelay);
+    if (!IRelayEntrypoint(compounderRelay).hasAnyRole(address(feeCompounder), COMPOUNDER_ROLE)) {
+      revert CompounderRoleMissing(address(feeCompounder));
+    }
+
     deployment = Deployment({
       token: address(token),
       votingEscrow: address(votingEscrow),
@@ -234,7 +277,9 @@ contract DeployRelayPoc is Script {
       vpm: address(vpm),
       relayFactory: address(relayFactory),
       relay: relay,
+      compounderRelay: compounderRelay,
       feeConverter: address(feeConverter),
+      feeCompounder: address(feeCompounder),
       manager: actors.manager,
       keeper: actors.keeper,
       strategist: actors.strategist,

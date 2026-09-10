@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end walkthrough of the MetaDEX relay cash-fee flow against a pinned Base-fork Anvil.
+# End-to-end walkthrough of both MetaDEX relay fee paths (cash-out FeeConverter + compounding FeeCompounder)
+# against a pinned Base-fork Anvil.
 # It runs the real root stack + unmodified MaxiRelay in Foundry's fork-test EVM, which is required because
 # TOKEN's post-migration transfer gate prevents an atomic live deployment and seed transaction.
 set -euo pipefail

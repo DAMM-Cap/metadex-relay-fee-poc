@@ -5,6 +5,7 @@ import {Test} from 'forge-std/Test.sol';
 import {console2} from 'forge-std/console2.sol';
 
 import {FeeConverter} from '../src/FeeConverter.sol';
+import {FeeCompounder} from '../src/FeeCompounder.sol';
 import {DeployRelayPoc} from '../script/DeployRelayPoc.s.sol';
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import {IRelay} from 'V3/interfaces/relay/IRelay.sol';
@@ -18,6 +19,9 @@ contract DemoRelayFeeTest is Test {
   uint256 internal constant GROSS_REWARD = 11_000e6;
   uint256 internal constant FEE = 1_100e6;
   uint256 internal constant NET_REWARD = 9_900e6;
+  uint256 internal constant TOKEN_GROSS = 11_000e18;
+  uint256 internal constant TOKEN_FEE = 1_100e18;
+  uint256 internal constant TOKEN_NET = 9_900e18;
 
   function test_demo() public {
     vm.createSelectFork(vm.envString('DEMO_RPC_URL'));
@@ -87,5 +91,27 @@ contract DemoRelayFeeTest is Test {
     assertEq(IERC20(USDC).balanceOf(manager), FEE, 'manager receives cash fee');
     assertEq(relay.accountedBalance(USDC), 0, 'claims clear accounting');
     assertApproxEqAbs(treasuryClaim + aliceClaim, NET_REWARD, 1, 'holders receive net reward');
+
+    // Second path: the sibling FeeCompounder on its own Relay takes its fee in TOKEN and compounds the net into
+    // backing, so no new shares mint and every share appreciates. A manager picks one path per Relay.
+    IRelay compounderRelay = IRelay(d.compounderRelay);
+    FeeCompounder compounder = FeeCompounder(d.feeCompounder);
+    uint256 backingBefore = compounderRelay.totalBacking();
+    vm.prank(address(deployer));
+    IERC20(d.token).transfer(d.compounderRelay, TOKEN_GROSS);
+    vm.prank(keeper);
+    compounder.compoundIdleBalance(d.compounderRelay);
+
+    console2.log('');
+    console2.log('--- MetaDEX relay compounding-fee demo ---');
+    console2.log('compounderRelay              ', d.compounderRelay);
+    console2.log('feeCompounder                ', d.feeCompounder);
+    console2.log('TOKEN reward compounded      ', TOKEN_GROSS);
+    console2.log('manager TOKEN after (fee)    ', IERC20(d.token).balanceOf(manager));
+    console2.log('backing growth (net)         ', compounderRelay.totalBacking() - backingBefore);
+    console2.log('--- gross TOKEN split into fee (cash) + net (compounded) ---');
+
+    assertEq(IERC20(d.token).balanceOf(manager), TOKEN_FEE, 'manager receives compounding fee in TOKEN');
+    assertEq(compounderRelay.totalBacking() - backingBefore, TOKEN_NET, 'net compounds into backing');
   }
 }
