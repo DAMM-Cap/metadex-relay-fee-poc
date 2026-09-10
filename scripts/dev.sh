@@ -14,7 +14,7 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-: "${BASE_RPC:?BASE_RPC must be set (copy .env.example to .env and fill in a Base archive RPC)}"
+: "${BASE_RPC:?BASE_RPC must be set (create .env containing BASE_RPC=<Base archive RPC URL>)}"
 
 port="${ANVIL_PORT:-18545}"
 rpc_url="http://127.0.0.1:${port}"
@@ -26,7 +26,7 @@ cleanup() {
   rm -f "$anvil_log"
 }
 
-anvil --fork-url "$BASE_RPC" --fork-block-number 50718500 --chain-id 8453 --port "$port" >"$anvil_log" 2>&1 &
+anvil --fork-url base --fork-block-number 50718500 --chain-id 8453 --port "$port" >"$anvil_log" 2>&1 &
 anvil_pid=$!
 trap cleanup EXIT INT TERM
 

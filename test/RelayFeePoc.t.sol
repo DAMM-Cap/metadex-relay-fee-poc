@@ -3,26 +3,54 @@ pragma solidity 0.8.36;
 
 import {Test} from 'forge-std/Test.sol';
 
-import {FeeConverter} from '../src/FeeConverter.sol';
-import {FeeCompounder} from '../src/FeeCompounder.sol';
 import {DeployRelayPoc} from '../script/DeployRelayPoc.s.sol';
+import {FeeCompounder} from '../src/FeeCompounder.sol';
+import {FeeConverter} from '../src/FeeConverter.sol';
+import {FeeEntrypointBase} from '../src/FeeEntrypointBase.sol';
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
-import {IRelay} from 'V3/interfaces/relay/IRelay.sol';
-import {IRelayFactory} from 'V3/interfaces/relay/IRelayFactory.sol';
-import {SingleConverter} from 'V3/relay/entrypoints/SingleConverter.sol';
-import {Compounder} from 'V3/relay/entrypoints/Compounder.sol';
+import {FactoryRegistry} from 'V3/factories/FactoryRegistry.sol';
 import {IFactoryRegistry} from 'V3/interfaces/factories/IFactoryRegistry.sol';
-import {ISingleConverter} from 'V3/interfaces/relay/entrypoints/ISingleConverter.sol';
-import {ICompounder} from 'V3/interfaces/relay/entrypoints/ICompounder.sol';
+import {IRelay} from 'V3/interfaces/relay/IRelay.sol';
 import {IRelayEntrypoint} from 'V3/interfaces/relay/IRelayEntrypoint.sol';
+import {IRelayFactory} from 'V3/interfaces/relay/IRelayFactory.sol';
 import {IBaseEntrypoint} from 'V3/interfaces/relay/entrypoints/IBaseEntrypoint.sol';
+import {ICompounder} from 'V3/interfaces/relay/entrypoints/ICompounder.sol';
+import {ISingleConverter} from 'V3/interfaces/relay/entrypoints/ISingleConverter.sol';
+import {Compounder} from 'V3/relay/entrypoints/Compounder.sol';
+import {SingleConverter} from 'V3/relay/entrypoints/SingleConverter.sol';
+
+contract SwapRouterStub {
+  address internal immutable INPUT_TOKEN;
+  address internal immutable OUTPUT_TOKEN;
+  uint256 internal immutable SPEND_AMOUNT;
+  uint256 internal immutable OUTPUT_AMOUNT;
+
+  error DeadlineExpired();
+  error TransferFailed();
+
+  constructor(address inputToken, address outputToken, uint256 spendAmount, uint256 outputAmount) {
+    INPUT_TOKEN = inputToken;
+    OUTPUT_TOKEN = outputToken;
+    SPEND_AMOUNT = spendAmount;
+    OUTPUT_AMOUNT = outputAmount;
+  }
+
+  function execute(bytes calldata, bytes[] calldata, uint256 deadline) external {
+    if (block.timestamp > deadline) revert DeadlineExpired();
+    if (!IERC20(INPUT_TOKEN).transferFrom(msg.sender, address(this), SPEND_AMOUNT)) revert TransferFailed();
+    if (!IERC20(OUTPUT_TOKEN).transfer(msg.sender, OUTPUT_AMOUNT)) revert TransferFailed();
+  }
+}
 
 contract RelayFeePocTest is Test {
   address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+  address internal constant WETH = 0x4200000000000000000000000000000000000006;
+  uint256 internal constant COMPOUNDER_ROLE = 1 << 2;
+  uint256 internal constant CONVERTER_ROLE = 1 << 3;
   uint256 internal constant FORK_BLOCK = 50_718_500;
   uint256 internal constant GROSS_REWARD = 11_000e6;
-  uint256 internal constant NET_REWARD = 9_900e6;
-  uint256 internal constant FEE = 1_100e6;
+  uint256 internal constant NET_REWARD = 9900e6;
+  uint256 internal constant FEE = 1100e6;
 
   DeployRelayPoc internal deploymentScript;
   DeployRelayPoc.Deployment internal deployment;
@@ -45,27 +73,29 @@ contract RelayFeePocTest is Test {
     treasury = makeAddr('treasury');
     alice = makeAddr('alice');
     deploymentScript = new DeployRelayPoc();
-    deployment = deploymentScript.deployForTest(DeployRelayPoc.Actors({
-      deployer: address(deploymentScript),
-      manager: manager,
-      keeper: keeper,
-      strategist: strategist,
-      treasury: treasury
-    }));
+    deployment = deploymentScript.deployForTest(
+      DeployRelayPoc.Actors({
+        deployer: address(deploymentScript),
+        manager: manager,
+        keeper: keeper,
+        strategist: strategist,
+        treasury: treasury
+      })
+    );
     converter = FeeConverter(deployment.feeConverter);
     compounder = FeeCompounder(deployment.feeCompounder);
     relay = IRelay(deployment.relay);
     compounderRelay = IRelay(deployment.compounderRelay);
 
     vm.warp(deployment.transfersEnabledAt);
-    _depositAlice(relay, 1_000e18);
-    _depositAlice(compounderRelay, 1_000e18);
+    _depositAlice(relay, 1000e18);
+    _depositAlice(compounderRelay, 1000e18);
   }
 
   /// @dev Alice stakes a fresh veNFT and deposits it into `r`, so she becomes a real Relay share holder.
   function _depositAlice(IRelay r, uint128 amount) private {
     vm.prank(address(deploymentScript));
-    IERC20(deployment.token).transfer(alice, amount);
+    assertTrue(IERC20(deployment.token).transfer(alice, amount), 'TOKEN funding transfer failed');
     vm.startPrank(alice);
     IERC20(deployment.token).approve(deployment.votingEscrow, amount);
     uint256 tokenId = r.VOTING_ESCROW().createStake(amount, 0, true);
@@ -83,7 +113,7 @@ contract RelayFeePocTest is Test {
   function test_nftDepositToHolderClaimThroughConfiguredConverter() public {
     ISingleConverter configuredConverter = converter;
     assertTrue(
-      IRelayEntrypoint(address(relay)).hasAnyRole(address(configuredConverter), 1 << 3),
+      IRelayEntrypoint(address(relay)).hasAnyRole(address(configuredConverter), CONVERTER_ROLE),
       'factory must attach converter with CONVERTER role'
     );
     assertGt(IERC20(address(relay.yieldToken())).balanceOf(alice), 0, 'NFT deposit must mint Alice yield shares');
@@ -109,7 +139,7 @@ contract RelayFeePocTest is Test {
     deal(USDC, address(relay), GROSS_REWARD);
 
     vm.expectEmit(true, true, false, true, address(converter));
-    emit FeeConverter.ManagementFeeTaken(address(relay), USDC, GROSS_REWARD, FEE);
+    emit FeeEntrypointBase.ManagementFeeTaken(address(relay), USDC, GROSS_REWARD, FEE);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
 
@@ -124,11 +154,11 @@ contract RelayFeePocTest is Test {
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
 
-    uint256 treasuryYT = IERC20(address(relay.yieldToken())).balanceOf(treasury);
-    uint256 aliceYT = IERC20(address(relay.yieldToken())).balanceOf(alice);
-    uint256 totalYT = IERC20(address(relay.yieldToken())).totalSupply();
-    uint256 expectedTreasury = NET_REWARD * treasuryYT / totalYT;
-    uint256 expectedAlice = NET_REWARD * aliceYT / totalYT;
+    uint256 treasuryYt = IERC20(address(relay.yieldToken())).balanceOf(treasury);
+    uint256 aliceYt = IERC20(address(relay.yieldToken())).balanceOf(alice);
+    uint256 totalYt = IERC20(address(relay.yieldToken())).totalSupply();
+    uint256 expectedTreasury = NET_REWARD * treasuryYt / totalYt;
+    uint256 expectedAlice = NET_REWARD * aliceYt / totalYt;
 
     vm.prank(treasury);
     uint256 treasuryClaim = relay.claim(USDC, treasury);
@@ -182,8 +212,8 @@ contract RelayFeePocTest is Test {
 
   function test_constructorRejectsFeeAboveCap() public {
     IFactoryRegistry registry = converter.FACTORY_REGISTRY();
-    vm.expectRevert(abi.encodeWithSelector(FeeConverter.FeeTooHigh.selector, 5_001));
-    new FeeConverter(registry, USDC, manager, 5_001);
+    vm.expectRevert(abi.encodeWithSelector(FeeEntrypointBase.FeeTooHigh.selector, 5001));
+    new FeeConverter(registry, USDC, manager, 5001);
   }
 
   function test_secondRoundAfterPartialClaim() public {
@@ -194,7 +224,7 @@ contract RelayFeePocTest is Test {
     uint256 aliceFirst = relay.claim(USDC, alice);
 
     // Fresh second-round reward stacked on top of the still-unclaimed first round.
-    uint256 secondGross = 1_000e6;
+    uint256 secondGross = 1000e6;
     deal(USDC, address(relay), IERC20(USDC).balanceOf(address(relay)) + secondGross);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
@@ -212,8 +242,89 @@ contract RelayFeePocTest is Test {
     // over an ~11e18 YT supply leave well under a cent of 6-decimal USDC un-drawn.
     uint256 netTotal = NET_REWARD + (secondGross - secondGross / 10);
     uint256 dust = 10_000; // 0.01 USDC
-    assertApproxEqAbs(aliceFirst + aliceSecond + treasuryClaim, netTotal, dust, 'holders draw both rounds net minus dust');
+    assertApproxEqAbs(
+      aliceFirst + aliceSecond + treasuryClaim, netTotal, dust, 'holders draw both rounds net minus dust'
+    );
     assertApproxEqAbs(relay.accountedBalance(USDC), 0, dust, 'accounting clears to dust after claims');
+  }
+
+  function test_converterDoesNotChargePriorRoundDustAgain() public {
+    // `notifyReward` leaves the sub-index remainder unaccounted. That remainder has already passed through the
+    // management-fee calculation and must not become fee-bearing again when the next reward arrives.
+    uint256 firstGross = GROSS_REWARD + 1000;
+    deal(USDC, address(relay), firstGross);
+    vm.prank(keeper);
+    converter.convertIdleBalance(address(relay));
+
+    uint256 firstFee = IERC20(USDC).balanceOf(manager);
+    uint256 priorDust = IERC20(USDC).balanceOf(address(relay)) - relay.accountedBalance(USDC);
+    assertGe(priorDust, 10, 'fixture must leave fee-relevant prior-round dust');
+
+    uint256 secondGross = 1000e6;
+    deal(USDC, address(relay), IERC20(USDC).balanceOf(address(relay)) + secondGross);
+    vm.prank(keeper);
+    converter.convertIdleBalance(address(relay));
+
+    assertEq(
+      IERC20(USDC).balanceOf(manager) - firstFee,
+      secondGross / 10,
+      'prior-round dust must not be charged a second management fee'
+    );
+  }
+
+  function test_swapAndConvertChargesOnlySwapOutputAndPreservesInputLeftover() public {
+    uint256 amountIn = 10e18;
+    uint256 amountSpent = 7e18;
+    uint256 swapGross = GROSS_REWARD + 1000;
+    uint256 directGross = 1000e6;
+    SwapRouterStub router = new SwapRouterStub(WETH, USDC, amountSpent, swapGross);
+
+    vm.prank(address(deploymentScript));
+    FactoryRegistry(deployment.factoryRegistry).registerMetaRouter(address(router));
+    deal(WETH, address(relay), amountIn);
+    deal(USDC, address(relay), directGross);
+    deal(USDC, address(router), swapGross);
+
+    vm.prank(keeper);
+    converter.swapAndConvert(_swapParams(address(relay), address(router), amountIn, swapGross));
+
+    uint256 swapFee = swapGross / 10;
+    assertEq(IERC20(USDC).balanceOf(manager), swapFee, 'manager fee is based only on measured swap output');
+    assertEq(IERC20(WETH).balanceOf(address(relay)), amountIn - amountSpent, 'unspent input returns to Relay');
+    assertEq(IERC20(WETH).allowance(address(converter), address(router)), 0, 'router allowance is cleared');
+
+    vm.prank(keeper);
+    converter.convertIdleBalance(address(relay));
+    assertEq(
+      IERC20(USDC).balanceOf(manager) - swapFee,
+      directGross / 10,
+      'later idle conversion charges the direct reward but not swap-round dust'
+    );
+  }
+
+  function test_entrypointsCannotProcessSiblingRelay() public {
+    assertFalse(
+      IRelayEntrypoint(address(relay)).hasAnyRole(address(compounder), COMPOUNDER_ROLE),
+      'converter Relay must not grant COMPOUNDER to FeeCompounder'
+    );
+    assertFalse(
+      IRelayEntrypoint(address(compounderRelay)).hasAnyRole(address(converter), CONVERTER_ROLE),
+      'compounder Relay must not grant CONVERTER to FeeConverter'
+    );
+
+    deal(USDC, address(compounderRelay), GROSS_REWARD);
+    vm.expectRevert(IRelay.NotAuthorized.selector);
+    vm.prank(keeper);
+    converter.convertIdleBalance(address(compounderRelay));
+
+    vm.prank(address(deploymentScript));
+    assertTrue(IERC20(deployment.token).transfer(address(relay), 11_000e18), 'cross-entrypoint TOKEN transfer failed');
+    vm.expectRevert(IRelay.NotAuthorized.selector);
+    vm.prank(keeper);
+    compounder.compoundIdleBalance(address(relay));
+
+    assertEq(IERC20(USDC).balanceOf(manager), 0, 'failed cross-entrypoint calls pay no fee');
+    assertEq(IERC20(deployment.token).balanceOf(manager), 0, 'failed cross-entrypoint calls move no TOKEN');
   }
 
   /// @notice NFT deposit (setUp) -> configured compounder -> Relay backing grows -> every share appreciates.
@@ -222,7 +333,7 @@ contract RelayFeePocTest is Test {
   function test_nftDepositBackingGrowsThroughConfiguredCompounder() public {
     ICompounder configuredCompounder = compounder;
     assertTrue(
-      IRelayEntrypoint(address(compounderRelay)).hasAnyRole(address(configuredCompounder), 1 << 2),
+      IRelayEntrypoint(address(compounderRelay)).hasAnyRole(address(configuredCompounder), COMPOUNDER_ROLE),
       'factory must attach compounder with COMPOUNDER role'
     );
     uint256 aliceShares = IERC20(address(compounderRelay.yieldToken())).balanceOf(alice);
@@ -235,10 +346,10 @@ contract RelayFeePocTest is Test {
 
     uint256 backingBefore = compounderRelay.totalBacking();
     vm.prank(address(deploymentScript));
-    IERC20(token).transfer(address(compounderRelay), gross);
+    assertTrue(IERC20(token).transfer(address(compounderRelay), gross), 'compounder TOKEN transfer failed');
 
     vm.expectEmit(true, true, false, true, address(configuredCompounder));
-    emit FeeCompounder.ManagementFeeTaken(address(compounderRelay), token, gross, fee);
+    emit FeeEntrypointBase.ManagementFeeTaken(address(compounderRelay), token, gross, fee);
     vm.prank(keeper);
     configuredCompounder.compoundIdleBalance(address(compounderRelay));
 
@@ -254,10 +365,12 @@ contract RelayFeePocTest is Test {
     uint256 gross = 11_000e18;
     uint256 fee = gross / 10;
     uint256 net = gross - fee;
+    uint256 idleUsdc = 123e6;
 
     uint256 backingBefore = compounderRelay.totalBacking();
     vm.prank(address(deploymentScript));
-    IERC20(token).transfer(address(compounderRelay), gross);
+    assertTrue(IERC20(token).transfer(address(compounderRelay), gross), 'compounder TOKEN transfer failed');
+    deal(USDC, address(compounderRelay), idleUsdc);
 
     vm.prank(keeper);
     compounder.compoundIdleBalance(address(compounderRelay));
@@ -265,7 +378,33 @@ contract RelayFeePocTest is Test {
     assertEq(IERC20(token).balanceOf(manager), fee, 'manager receives the fee in TOKEN');
     assertEq(compounderRelay.totalBacking() - backingBefore, net, 'only the net is compounded into backing');
     assertEq(IERC20(token).balanceOf(address(compounderRelay)), 0, 'no idle TOKEN is stranded on the Relay');
+    assertEq(IERC20(USDC).balanceOf(address(compounderRelay)), idleUsdc, 'registered reward remains idle');
     assertEq(IERC20(USDC).balanceOf(manager), 0, 'the compounder never pays the manager in the reward token');
+  }
+
+  function test_swapAndCompoundChargesTokenFeeAndReturnsInputLeftover() public {
+    address token = deployment.token;
+    uint256 amountIn = 10e18;
+    uint256 amountSpent = 7e18;
+    uint256 gross = 11_000e18;
+    uint256 fee = gross / 10;
+    SwapRouterStub router = new SwapRouterStub(WETH, token, amountSpent, gross);
+
+    vm.prank(address(deploymentScript));
+    FactoryRegistry(deployment.factoryRegistry).registerMetaRouter(address(router));
+    deal(WETH, address(compounderRelay), amountIn);
+    vm.prank(address(deploymentScript));
+    assertTrue(IERC20(token).transfer(address(router), gross), 'router TOKEN funding failed');
+    uint256 backingBefore = compounderRelay.totalBacking();
+
+    vm.prank(keeper);
+    compounder.swapAndCompound(_swapParams(address(compounderRelay), address(router), amountIn, gross));
+
+    assertEq(IERC20(token).balanceOf(manager), fee, 'manager receives measured swap fee in TOKEN');
+    assertEq(compounderRelay.totalBacking() - backingBefore, gross - fee, 'only swap net compounds into backing');
+    assertEq(IERC20(WETH).balanceOf(address(compounderRelay)), amountIn - amountSpent, 'unspent input returns to Relay');
+    assertEq(IERC20(WETH).allowance(address(compounder), address(router)), 0, 'router allowance is cleared');
+    assertEq(IERC20(token).balanceOf(address(compounderRelay)), 0, 'no swapped TOKEN remains idle');
   }
 
   function test_parityWithStockCompounderAtZeroFee() public {
@@ -287,8 +426,8 @@ contract RelayFeePocTest is Test {
     uint256 stockBackingBefore = IRelay(stockRelay).totalBacking();
 
     vm.startPrank(address(deploymentScript));
-    IERC20(token).transfer(zeroFeeRelay, gross);
-    IERC20(token).transfer(stockRelay, gross);
+    assertTrue(IERC20(token).transfer(zeroFeeRelay, gross), 'zero-fee Relay funding failed');
+    assertTrue(IERC20(token).transfer(stockRelay, gross), 'stock Relay funding failed');
     vm.stopPrank();
 
     vm.prank(keeper);
@@ -304,7 +443,9 @@ contract RelayFeePocTest is Test {
 
   function test_compounderRevertsWhenNotKeeper() public {
     vm.prank(address(deploymentScript));
-    IERC20(deployment.token).transfer(address(compounderRelay), 11_000e18);
+    assertTrue(
+      IERC20(deployment.token).transfer(address(compounderRelay), 11_000e18), 'compounder TOKEN transfer failed'
+    );
 
     vm.expectRevert(IBaseEntrypoint.NotKeeper.selector);
     compounder.compoundIdleBalance(address(compounderRelay));
@@ -318,8 +459,26 @@ contract RelayFeePocTest is Test {
 
   function test_compounderRejectsFeeAboveCap() public {
     IFactoryRegistry registry = compounder.FACTORY_REGISTRY();
-    vm.expectRevert(abi.encodeWithSelector(FeeCompounder.FeeTooHigh.selector, 5_001));
-    new FeeCompounder(registry, manager, 5_001);
+    vm.expectRevert(abi.encodeWithSelector(FeeEntrypointBase.FeeTooHigh.selector, 5001));
+    new FeeCompounder(registry, manager, 5001);
+  }
+
+  function _swapParams(
+    address relay_,
+    address router,
+    uint256 amountIn,
+    uint256 minAmountOut
+  ) private view returns (IBaseEntrypoint.SwapParams memory) {
+    return IBaseEntrypoint.SwapParams({
+      relay: relay_,
+      router: router,
+      tokenIn: WETH,
+      amountIn: amountIn,
+      minAmountOut: minAmountOut,
+      deadline: block.timestamp + 1,
+      commands: '',
+      inputs: new bytes[](0)
+    });
   }
 
   function _createParams(address converter_, bytes32 salt) private view returns (IRelayFactory.CreateParams memory) {
@@ -351,7 +510,10 @@ contract RelayFeePocTest is Test {
     });
   }
 
-  function _compounderParams(address compounder_, bytes32 salt) private view returns (IRelayFactory.CreateParams memory) {
+  function _compounderParams(
+    address compounder_,
+    bytes32 salt
+  ) private view returns (IRelayFactory.CreateParams memory) {
     return IRelayFactory.CreateParams({
       admin: address(deploymentScript),
       keeper: keeper,

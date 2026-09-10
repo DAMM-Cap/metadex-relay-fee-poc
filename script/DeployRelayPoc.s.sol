@@ -3,45 +3,44 @@ pragma solidity 0.8.36;
 
 import {Script} from 'forge-std/Script.sol';
 
-import {FeeConverter} from '../src/FeeConverter.sol';
 import {FeeCompounder} from '../src/FeeCompounder.sol';
-import {RootMessageOrchestrator} from 'V3/bridge/RootMessageOrchestrator.sol';
+import {FeeConverter} from '../src/FeeConverter.sol';
 import {VeArtProxy} from 'V3/art/VeArtProxy.sol';
+import {RootMessageOrchestrator} from 'V3/bridge/RootMessageOrchestrator.sol';
 import {VotingEscrow} from 'V3/core/VotingEscrow.sol';
+import {FactoryRegistry} from 'V3/factories/FactoryRegistry.sol';
+import {IVotingEscrow} from 'V3/interfaces/core/IVotingEscrow.sol';
+import {IGovernor} from 'V3/interfaces/governor/IGovernor.sol';
+import {IMinter} from 'V3/interfaces/minter/IMinter.sol';
+import {IRelay} from 'V3/interfaces/relay/IRelay.sol';
+import {IRelayEntrypoint} from 'V3/interfaces/relay/IRelayEntrypoint.sol';
+import {IRelayFactory} from 'V3/interfaces/relay/IRelayFactory.sol';
+import {MAX_PIPS, WEEK} from 'V3/libraries/ProtocolConstants.sol';
+import {Roles} from 'V3/libraries/Roles.sol';
 import {Minter} from 'V3/minter/Minter.sol';
-import {Splitter} from 'V3/splitter/Splitter.sol';
-import {Token} from 'V3/token/Token.sol';
-import {Voter} from 'V3/voter/Voter.sol';
-import {VoterPaymentsModule} from 'V3/vpm/VoterPaymentsModule.sol';
 import {MaxiRelay} from 'V3/relay/MaxiRelay.sol';
 import {ProtocolRelay} from 'V3/relay/ProtocolRelay.sol';
 import {RelayFactory} from 'V3/relay/RelayFactory.sol';
 import {RelayToken} from 'V3/relay/RelayToken.sol';
 import {RelayTokenVotes} from 'V3/relay/RelayTokenVotes.sol';
 import {RelayVoteAdapter} from 'V3/relay/RelayVoteAdapter.sol';
-import {IFactoryRegistry} from 'V3/interfaces/factories/IFactoryRegistry.sol';
-import {IGovernor} from 'V3/interfaces/governor/IGovernor.sol';
-import {IMinter} from 'V3/interfaces/minter/IMinter.sol';
-import {IRelay} from 'V3/interfaces/relay/IRelay.sol';
-import {IRelayEntrypoint} from 'V3/interfaces/relay/IRelayEntrypoint.sol';
-import {IRelayFactory} from 'V3/interfaces/relay/IRelayFactory.sol';
-import {IVotingEscrow} from 'V3/interfaces/core/IVotingEscrow.sol';
-import {Roles} from 'V3/libraries/Roles.sol';
-import {MAX_PIPS, WEEK} from 'V3/libraries/ProtocolConstants.sol';
+import {Splitter} from 'V3/splitter/Splitter.sol';
+import {Token} from 'V3/token/Token.sol';
+import {Voter} from 'V3/voter/Voter.sol';
+import {VoterPaymentsModule} from 'V3/vpm/VoterPaymentsModule.sol';
 
-/// @dev The idle fee lane never reads either stub. They only satisfy non-zero immutable dependencies.
+/// @dev The idle proof never reads governance. This stub only satisfies RelayFactory's non-zero dependency.
 contract GovernorStub {}
-contract FactoryRegistryStub {}
 
-/// @notice Deploys a root-only MetaDEX stack plus an unmodified MaxiRelay and a fee-taking converter.
+/// @notice Deploys a root-only MetaDEX stack plus unmodified MaxiRelays and DAMM's two fee entrypoints for fork tests.
 contract DeployRelayPoc is Script {
   uint256 public constant BASE_CHAIN_ID = 8453;
   uint256 public constant FORK_BLOCK = 50_718_500;
   address public constant WETH = 0x4200000000000000000000000000000000000006;
   address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-  uint256 internal constant MANAGEMENT_FEE_BPS = 1_000;
+  uint256 internal constant MANAGEMENT_FEE_BPS = 1000;
   uint128 internal constant SEED_AMOUNT = 10_000e18;
-  /// @dev Mirror `RelayRoles` bits (an abstract contract, so its constants are not reachable via `type()`).
+  /// @dev Mirror RelayRoles bits because IRelayEntrypoint exposes only KEEPER.
   uint256 internal constant COMPOUNDER_ROLE = 1 << 2;
   uint256 internal constant CONVERTER_ROLE = 1 << 3;
 
@@ -66,6 +65,7 @@ contract DeployRelayPoc is Script {
     address voter;
     address vpm;
     address relayFactory;
+    address factoryRegistry;
     address feeConverter;
     address feeCompounder;
     address relay;
@@ -75,21 +75,6 @@ contract DeployRelayPoc is Script {
     address strategist;
     address treasury;
     uint48 transfersEnabledAt;
-  }
-
-  function run() external returns (Deployment memory deployment) {
-    uint256 privateKey = vm.envUint('PRIVATE_KEY');
-    Actors memory actors = Actors({
-      deployer: vm.addr(privateKey),
-      manager: vm.envAddress('FEE_RECIPIENT'),
-      keeper: vm.envAddress('KEEPER'),
-      strategist: vm.envAddress('STRATEGIST'),
-      treasury: vm.envAddress('TREASURY')
-    });
-
-    vm.startBroadcast(privateKey);
-    deployment = _deploy(actors, actors.deployer);
-    vm.stopBroadcast();
   }
 
   function deployForTest(Actors memory actors) external returns (Deployment memory deployment) {
@@ -146,6 +131,8 @@ contract DeployRelayPoc is Script {
         minBaseRateUpdateCooldown: WEEK,
         maxBaseRateUpdateCooldown: WEEK,
         maxBandFloorPips: 1,
+        // MAX_PIPS is 1_000_000, safely below uint24 max.
+        // forge-lint: disable-next-line(unsafe-typecast)
         maxBandCeilingPips: uint24(MAX_PIPS)
       })
     });
@@ -175,7 +162,8 @@ contract DeployRelayPoc is Script {
     RelayToken relayToken = new RelayToken();
     RelayTokenVotes relayTokenVotes = new RelayTokenVotes();
     RelayVoteAdapter voteAdapter = new RelayVoteAdapter();
-    MaxiRelay maxiImplementation = new MaxiRelay(votingEscrow, voter, address(relayTokenVotes), address(relayToken), WETH);
+    MaxiRelay maxiImplementation =
+      new MaxiRelay(votingEscrow, voter, address(relayTokenVotes), address(relayToken), WETH);
     ProtocolRelay protocolImplementation =
       new ProtocolRelay(votingEscrow, voter, address(relayTokenVotes), address(relayToken), WETH);
     RelayFactory relayFactory = new RelayFactory(
@@ -188,46 +176,46 @@ contract DeployRelayPoc is Script {
       voteAdapter
     );
     voter.grantRole(Roles.RELAY_DEPLOYER_ROLE, actors.deployer);
+    voter.grantRole(Roles.FACTORY_REGISTRY_ADMIN_ROLE, actors.deployer);
+    FactoryRegistry factoryRegistry = new FactoryRegistry(address(0), address(voter));
 
-    FeeConverter feeConverter = new FeeConverter(
-      IFactoryRegistry(address(new FactoryRegistryStub())), USDC, actors.manager, MANAGEMENT_FEE_BPS
-    );
+    FeeConverter feeConverter = new FeeConverter(factoryRegistry, USDC, actors.manager, MANAGEMENT_FEE_BPS);
 
-    FeeCompounder feeCompounder = new FeeCompounder(
-      IFactoryRegistry(address(new FactoryRegistryStub())), actors.manager, MANAGEMENT_FEE_BPS
-    );
+    FeeCompounder feeCompounder = new FeeCompounder(factoryRegistry, actors.manager, MANAGEMENT_FEE_BPS);
 
     // TOKEN transfers stay gated until one week after migration opens. The seed stake below routes TOKEN through
     // the non-exempt RelayFactory, so advance the clock to the enable time before any relay is seeded.
     vm.warp(uint256(migrationOpen) + 1 weeks);
     token.approve(address(relayFactory), SEED_AMOUNT);
 
-    (address relay,) = relayFactory.createMaxiRelay(IRelayFactory.CreateParams({
-      admin: actors.deployer,
-      keeper: actors.keeper,
-      voter: actors.strategist,
-      compounder: address(0),
-      converter: address(feeConverter),
-      bootstrapOwner: actors.treasury,
-      rewardToken: USDC,
-      entrypointVetoer: address(0),
-      seedAmount: SEED_AMOUNT,
-      isPermanent: true,
-      ytTransferable: false,
-      stakingWeeks: 0,
-      salt: keccak256('metadex-relay-fee-poc'),
-      config: IRelay.RelayConfig({
-        tokenId: 0,
-        minDeposit: 1e18,
-        keeperWindow: 1 days,
-        minWithdrawal: 1e18,
-        entrypointTimelock: 2 days,
-        lockWeeks: 0,
-        evacuationWindow: 7 days,
-        name: 'DAMM Relay',
-        symbol: 'dREL'
+    (address relay,) = relayFactory.createMaxiRelay(
+      IRelayFactory.CreateParams({
+        admin: actors.deployer,
+        keeper: actors.keeper,
+        voter: actors.strategist,
+        compounder: address(0),
+        converter: address(feeConverter),
+        bootstrapOwner: actors.treasury,
+        rewardToken: USDC,
+        entrypointVetoer: address(0),
+        seedAmount: SEED_AMOUNT,
+        isPermanent: true,
+        ytTransferable: false,
+        stakingWeeks: 0,
+        salt: keccak256('metadex-relay-fee-poc'),
+        config: IRelay.RelayConfig({
+          tokenId: 0,
+          minDeposit: 1e18,
+          keeperWindow: 1 days,
+          minWithdrawal: 1e18,
+          entrypointTimelock: 2 days,
+          lockWeeks: 0,
+          evacuationWindow: 7 days,
+          name: 'DAMM Relay',
+          symbol: 'dREL'
+        })
       })
-    }));
+    );
 
     // Smoke checks: the factory recognises the relay, and the fee converter holds the CONVERTER role that
     // authorises pull + notifyReward. If either fails the whole deployment is void.
@@ -239,32 +227,34 @@ contract DeployRelayPoc is Script {
     // A manager picks one yield path per Relay, so the compounder gets its own single-entrypoint Relay: it holds
     // COMPOUNDER (not CONVERTER), takes its fee in TOKEN, and compounds the net into backing.
     token.approve(address(relayFactory), SEED_AMOUNT);
-    (address compounderRelay,) = relayFactory.createMaxiRelay(IRelayFactory.CreateParams({
-      admin: actors.deployer,
-      keeper: actors.keeper,
-      voter: actors.strategist,
-      compounder: address(feeCompounder),
-      converter: address(0),
-      bootstrapOwner: actors.treasury,
-      rewardToken: USDC,
-      entrypointVetoer: address(0),
-      seedAmount: SEED_AMOUNT,
-      isPermanent: true,
-      ytTransferable: false,
-      stakingWeeks: 0,
-      salt: keccak256('metadex-relay-fee-poc-compounder'),
-      config: IRelay.RelayConfig({
-        tokenId: 0,
-        minDeposit: 1e18,
-        keeperWindow: 1 days,
-        minWithdrawal: 1e18,
-        entrypointTimelock: 2 days,
-        lockWeeks: 0,
-        evacuationWindow: 7 days,
-        name: 'DAMM Relay',
-        symbol: 'dREL'
+    (address compounderRelay,) = relayFactory.createMaxiRelay(
+      IRelayFactory.CreateParams({
+        admin: actors.deployer,
+        keeper: actors.keeper,
+        voter: actors.strategist,
+        compounder: address(feeCompounder),
+        converter: address(0),
+        bootstrapOwner: actors.treasury,
+        rewardToken: USDC,
+        entrypointVetoer: address(0),
+        seedAmount: SEED_AMOUNT,
+        isPermanent: true,
+        ytTransferable: false,
+        stakingWeeks: 0,
+        salt: keccak256('metadex-relay-fee-poc-compounder'),
+        config: IRelay.RelayConfig({
+          tokenId: 0,
+          minDeposit: 1e18,
+          keeperWindow: 1 days,
+          minWithdrawal: 1e18,
+          entrypointTimelock: 2 days,
+          lockWeeks: 0,
+          evacuationWindow: 7 days,
+          name: 'DAMM Relay',
+          symbol: 'dREL'
+        })
       })
-    }));
+    );
     if (!relayFactory.isRelay(compounderRelay)) revert RelaySmokeFailed(compounderRelay);
     if (!IRelayEntrypoint(compounderRelay).hasAnyRole(address(feeCompounder), COMPOUNDER_ROLE)) {
       revert CompounderRoleMissing(address(feeCompounder));
@@ -276,6 +266,7 @@ contract DeployRelayPoc is Script {
       voter: address(voter),
       vpm: address(vpm),
       relayFactory: address(relayFactory),
+      factoryRegistry: address(factoryRegistry),
       relay: relay,
       compounderRelay: compounderRelay,
       feeConverter: address(feeConverter),

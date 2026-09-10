@@ -411,7 +411,7 @@
   resolved "https://registry.yarnpkg.com/@noble/hashes/-/hashes-1.6.1.tgz#df6e5943edcea504bac61395926d6fd67869a0d5"
   integrity sha512-pq5D8h10hHBjyqX+cfBm0i8JUXJ0UhczFc4r74zbuT9XgewFo2E3J1cOaGtdZynILNmQ685YWGzGE1Zv6io50w==
 
-"@nomad-xyz/excessively-safe-call@https://github.com/nomad-xyz/ExcessivelySafeCall":
+"@nomad-xyz/excessively-safe-call@https://github.com/nomad-xyz/ExcessivelySafeCall#81cd99ce3e69117d665d7601c330ea03b97acce0":
   version "0.0.1-rc.1"
   resolved "https://github.com/nomad-xyz/ExcessivelySafeCall#81cd99ce3e69117d665d7601c330ea03b97acce0"
 
