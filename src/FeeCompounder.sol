@@ -15,9 +15,10 @@ import {FeeEntrypointBase} from './FeeEntrypointBase.sol';
 contract FeeCompounder is FeeEntrypointBase, ICompounder {
   constructor(
     IFactoryRegistry registry,
-    address feeRecipient,
+    address feeOwner,
+    address initialFeeRecipient,
     uint256 feeBps
-  ) FeeEntrypointBase(registry, feeRecipient, feeBps) {}
+  ) FeeEntrypointBase(registry, feeOwner, initialFeeRecipient, feeBps) {}
 
   /// @notice Skims the management fee from the Relay's unaccounted TOKEN balance, then compounds the net into backing.
   /// @dev Mirrors Dromos `Compounder.compoundIdleBalance`, inserting only the fee split before `compound`.

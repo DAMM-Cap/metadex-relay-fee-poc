@@ -17,9 +17,10 @@ contract FeeConverter is FeeEntrypointBase, ISingleConverter {
   constructor(
     IFactoryRegistry registry,
     address tokenOut,
-    address feeRecipient,
+    address feeOwner,
+    address initialFeeRecipient,
     uint256 feeBps
-  ) FeeEntrypointBase(registry, feeRecipient, feeBps) {
+  ) FeeEntrypointBase(registry, feeOwner, initialFeeRecipient, feeBps) {
     if (tokenOut == address(0)) revert ZeroAddress();
     TARGET_TOKEN = tokenOut;
   }

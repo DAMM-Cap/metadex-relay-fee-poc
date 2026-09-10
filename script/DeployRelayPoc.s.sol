@@ -179,9 +179,11 @@ contract DeployRelayPoc is Script {
     voter.grantRole(Roles.FACTORY_REGISTRY_ADMIN_ROLE, actors.deployer);
     FactoryRegistry factoryRegistry = new FactoryRegistry(address(0), address(voter));
 
-    FeeConverter feeConverter = new FeeConverter(factoryRegistry, USDC, actors.manager, MANAGEMENT_FEE_BPS);
+    FeeConverter feeConverter =
+      new FeeConverter(factoryRegistry, USDC, actors.deployer, actors.manager, MANAGEMENT_FEE_BPS);
 
-    FeeCompounder feeCompounder = new FeeCompounder(factoryRegistry, actors.manager, MANAGEMENT_FEE_BPS);
+    FeeCompounder feeCompounder =
+      new FeeCompounder(factoryRegistry, actors.deployer, actors.manager, MANAGEMENT_FEE_BPS);
 
     // TOKEN transfers stay gated until one week after migration opens. The seed stake below routes TOKEN through
     // the non-exempt RelayFactory, so advance the clock to the enable time before any relay is seeded.

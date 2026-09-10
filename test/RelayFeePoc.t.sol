@@ -7,6 +7,7 @@ import {DeployRelayPoc} from '../script/DeployRelayPoc.s.sol';
 import {FeeCompounder} from '../src/FeeCompounder.sol';
 import {FeeConverter} from '../src/FeeConverter.sol';
 import {FeeEntrypointBase} from '../src/FeeEntrypointBase.sol';
+import {Ownable} from '@openzeppelin/contracts/access/Ownable.sol';
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import {FactoryRegistry} from 'V3/factories/FactoryRegistry.sol';
 import {IFactoryRegistry} from 'V3/interfaces/factories/IFactoryRegistry.sol';
@@ -149,6 +150,46 @@ contract RelayFeePocTest is Test {
     assertEq(IERC20(address(relay.principalToken())).balanceOf(manager), 0, 'manager receives no principal tokens');
   }
 
+  function test_feeOwnerCanUpdateRecipientForBothEntrypoints() public {
+    address newRecipient = makeAddr('newFeeRecipient');
+    vm.startPrank(address(deploymentScript));
+    converter.setFeeRecipient(newRecipient);
+    compounder.setFeeRecipient(newRecipient);
+    vm.stopPrank();
+
+    deal(USDC, address(relay), GROSS_REWARD);
+    uint256 tokenGross = 11_000e18;
+    vm.prank(address(deploymentScript));
+    assertTrue(
+      IERC20(deployment.token).transfer(address(compounderRelay), tokenGross), 'compounder TOKEN transfer failed'
+    );
+
+    vm.startPrank(keeper);
+    converter.convertIdleBalance(address(relay));
+    compounder.compoundIdleBalance(address(compounderRelay));
+    vm.stopPrank();
+
+    assertEq(IERC20(USDC).balanceOf(newRecipient), FEE, 'new recipient receives converter fee');
+    assertEq(IERC20(deployment.token).balanceOf(newRecipient), tokenGross / 10, 'new recipient receives compounder fee');
+    assertEq(IERC20(USDC).balanceOf(manager), 0, 'old recipient receives no converter fee');
+    assertEq(IERC20(deployment.token).balanceOf(manager), 0, 'old recipient receives no compounder fee');
+  }
+
+  function test_nonOwnerCannotUpdateFeeRecipient() public {
+    address unauthorized = makeAddr('unauthorized');
+    vm.startPrank(unauthorized);
+    vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, unauthorized));
+    converter.setFeeRecipient(makeAddr('newFeeRecipient'));
+    vm.stopPrank();
+  }
+
+  function test_feeOwnerCannotSetZeroRecipient() public {
+    vm.startPrank(address(deploymentScript));
+    vm.expectRevert(IBaseEntrypoint.ZeroAddress.selector);
+    converter.setFeeRecipient(address(0));
+    vm.stopPrank();
+  }
+
   function test_holdersClaimExactlyNetProRata() public {
     deal(USDC, address(relay), GROSS_REWARD);
     vm.prank(keeper);
@@ -171,7 +212,7 @@ contract RelayFeePocTest is Test {
   }
 
   function test_parityWithStockConverterAtZeroFee() public {
-    FeeConverter zeroFeeConverter = new FeeConverter(converter.FACTORY_REGISTRY(), USDC, manager, 0);
+    FeeConverter zeroFeeConverter = new FeeConverter(converter.FACTORY_REGISTRY(), USDC, address(this), manager, 0);
     SingleConverter stockConverter = new SingleConverter(converter.FACTORY_REGISTRY(), USDC);
     IRelayFactory factory = IRelayFactory(deployment.relayFactory);
 
@@ -213,7 +254,7 @@ contract RelayFeePocTest is Test {
   function test_constructorRejectsFeeAboveCap() public {
     IFactoryRegistry registry = converter.FACTORY_REGISTRY();
     vm.expectRevert(abi.encodeWithSelector(FeeEntrypointBase.FeeTooHigh.selector, 5001));
-    new FeeConverter(registry, USDC, manager, 5001);
+    new FeeConverter(registry, USDC, address(this), manager, 5001);
   }
 
   function test_secondRoundAfterPartialClaim() public {
@@ -408,7 +449,7 @@ contract RelayFeePocTest is Test {
   }
 
   function test_parityWithStockCompounderAtZeroFee() public {
-    FeeCompounder zeroFeeCompounder = new FeeCompounder(compounder.FACTORY_REGISTRY(), manager, 0);
+    FeeCompounder zeroFeeCompounder = new FeeCompounder(compounder.FACTORY_REGISTRY(), address(this), manager, 0);
     Compounder stockCompounder = new Compounder(compounder.FACTORY_REGISTRY());
     IRelayFactory factory = IRelayFactory(deployment.relayFactory);
 
@@ -460,7 +501,7 @@ contract RelayFeePocTest is Test {
   function test_compounderRejectsFeeAboveCap() public {
     IFactoryRegistry registry = compounder.FACTORY_REGISTRY();
     vm.expectRevert(abi.encodeWithSelector(FeeEntrypointBase.FeeTooHigh.selector, 5001));
-    new FeeCompounder(registry, manager, 5001);
+    new FeeCompounder(registry, address(this), manager, 5001);
   }
 
   function _swapParams(

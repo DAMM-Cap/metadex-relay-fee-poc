@@ -9,16 +9,18 @@ A manager selects one fee path per Relay. Both are custom Relay entrypoints that
 **`FeeConverter`** (fee in cash) implements Dromos `ISingleConverter` and holds the `MaxiRelay`'s `CONVERTER` role. It:
 
 1. measures USDC that is on the Relay but not yet accounted;
-2. pulls a bounded manager fee from the Relay and transfers that fee as USDC to `FEE_RECIPIENT`;
+2. pulls a bounded manager fee from the Relay and transfers that fee as USDC to `feeRecipient`;
 3. calls `notifyReward` with the remainder; and
 4. lets Relay holders claim the net reward pro rata.
 
 **`FeeCompounder`** (fee in TOKEN, net compounded) implements Dromos `ICompounder` and holds the `COMPOUNDER` role on a sibling Relay. It:
 
 1. measures unaccounted TOKEN on the Relay;
-2. pulls the manager fee and transfers it as TOKEN to `FEE_RECIPIENT`;
+2. pulls the manager fee and transfers it as TOKEN to `feeRecipient`;
 3. calls `compound` with the remainder, growing `totalBacking`; and
 4. mints no new shares, so every existing share appreciates.
+
+Each entrypoint has a separate OpenZeppelin `Ownable2Step` owner, initialized to the deployment admin. The current owner can call `setFeeRecipient` with a non-zero address; the new recipient receives only future fees. Ownership itself rotates through `transferOwnership` plus `acceptOwnership`. The fee rate and converter target remain immutable.
 
 The core proof forks Base at block `50,718,500`, deploys a fresh root-only MetaDEX stack, VPM, Relay factory, real `FactoryRegistry`, real `MaxiRelay`, and both entrypoints; no VE/Voter/VPM mocks are used. It includes the full protocol call topology: NFT deposit → keeper calls the configured entrypoint → entrypoint calls Relay `pull`/`notifyReward` (converter) or `pull`/`compound` (compounder) → holders claim the net reward or hold appreciated shares. MetaDEX deliberately has no Relay callback that dispatches into an entrypoint.
 
@@ -42,7 +44,7 @@ forge test --match-path test/RelayFeePoc.t.sol -vv
 forge test --match-path test/RelayFeePoc.t.sol --gas-report
 ```
 
-The eighteen tests cover both paths: the complete NFT-deposit → configured-entrypoint → Relay flow; cash-fee settlement with net pro-rata claims; fee-in-TOKEN with net compounding; parity with Dromos `SingleConverter`/`Compounder` at 0 bps; keeper, empty-balance, fee-cap, and cross-Relay role guards; repeated reward rounds with consistent cross-round accounting; and both swap lanes through an approved deterministic router, including fee bases, input refunds, and allowance cleanup.
+The twenty-one tests cover both paths: the complete NFT-deposit → configured-entrypoint → Relay flow; cash-fee settlement with net pro-rata claims; fee-in-TOKEN with net compounding; owner-controlled recipient rotation for both entrypoints; unauthorized and zero-recipient guards; parity with Dromos `SingleConverter`/`Compounder` at 0 bps; keeper, empty-balance, fee-cap, and cross-Relay role guards; repeated reward rounds with consistent cross-round accounting; and both swap lanes through an approved deterministic router, including fee bases, input refunds, and allowance cleanup.
 
 Observed on the pinned fork:
 
@@ -73,7 +75,7 @@ export FEE_COMPOUNDER=0x...
 export USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
 
 cast call "$FEE_CONVERTER" 'FEE_BPS()(uint256)' --rpc-url "$RPC_URL"
-cast call "$FEE_CONVERTER" 'FEE_RECIPIENT()(address)' --rpc-url "$RPC_URL"
+cast call "$FEE_CONVERTER" 'feeRecipient()(address)' --rpc-url "$RPC_URL"
 cast call "$RELAY" 'accountedBalance(address)(uint256)' "$USDC" --rpc-url "$RPC_URL"
 cast call "$RELAY" 'hasAnyRole(address,uint256)(bool)' "$FEE_CONVERTER" 8 --rpc-url "$RPC_URL"
 cast call "$COMPOUNDER_RELAY" 'hasAnyRole(address,uint256)(bool)' "$FEE_COMPOUNDER" 4 --rpc-url "$RPC_URL"

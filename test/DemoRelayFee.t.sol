@@ -46,7 +46,7 @@ contract DemoRelayFeeTest is Test {
     console2.log('relay              ', d.relay);
     console2.log('feeConverter       ', d.feeConverter);
     console2.log('fee bps            ', converter.FEE_BPS());
-    console2.log('fee recipient      ', converter.FEE_RECIPIENT());
+    console2.log('fee recipient      ', converter.feeRecipient());
 
     // Give a second holder a stake so the pro-rata split is visible.
     vm.warp(d.transfersEnabledAt);
