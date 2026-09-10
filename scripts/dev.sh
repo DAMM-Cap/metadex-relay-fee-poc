@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end walkthrough of both MetaDEX relay fee paths (cash-out FeeConverter + compounding FeeCompounder)
-# against a pinned Base-fork Anvil.
-# It runs the real root stack + unmodified MaxiRelay in Foundry's fork-test EVM, which is required because
-# TOKEN's post-migration transfer gate prevents an atomic live deployment and seed transaction.
+# End-to-end walkthrough of all three MetaDEX Relay fee entrypoints: cash-out FeeConverter, compounding
+# FeeCompounder, and the bound Protocol L2 FeeMultiHybrid.
+# It runs the real root stack, two unmodified MaxiRelays, and one unmodified ProtocolRelay in Foundry's
+# fork-test EVM because TOKEN's post-migration transfer gate prevents an atomic live deployment and seed transaction.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

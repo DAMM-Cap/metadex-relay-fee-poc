@@ -6,7 +6,8 @@ import {Test} from 'forge-std/Test.sol';
 import {DeployRelayPoc} from '../script/DeployRelayPoc.s.sol';
 import {FeeCompounder} from '../src/FeeCompounder.sol';
 import {FeeConverter} from '../src/FeeConverter.sol';
-import {FeeEntrypointBase} from '../src/FeeEntrypointBase.sol';
+import {FeeMultiHybrid} from '../src/FeeMultiHybrid.sol';
+import {FeePolicy} from '../src/FeePolicy.sol';
 import {Ownable} from '@openzeppelin/contracts/access/Ownable.sol';
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import {FactoryRegistry} from 'V3/factories/FactoryRegistry.sol';
@@ -16,6 +17,7 @@ import {IRelayEntrypoint} from 'V3/interfaces/relay/IRelayEntrypoint.sol';
 import {IRelayFactory} from 'V3/interfaces/relay/IRelayFactory.sol';
 import {IBaseEntrypoint} from 'V3/interfaces/relay/entrypoints/IBaseEntrypoint.sol';
 import {ICompounder} from 'V3/interfaces/relay/entrypoints/ICompounder.sol';
+import {IMultiEntrypoint} from 'V3/interfaces/relay/entrypoints/IMultiEntrypoint.sol';
 import {ISingleConverter} from 'V3/interfaces/relay/entrypoints/ISingleConverter.sol';
 import {Compounder} from 'V3/relay/entrypoints/Compounder.sol';
 import {SingleConverter} from 'V3/relay/entrypoints/SingleConverter.sol';
@@ -59,6 +61,8 @@ contract RelayFeePocTest is Test {
   IRelay internal relay;
   IRelay internal compounderRelay;
   FeeCompounder internal compounder;
+  FeeMultiHybrid internal hybrid;
+  IRelay internal hybridRelay;
   address internal manager;
   address internal keeper;
   address internal strategist;
@@ -87,6 +91,8 @@ contract RelayFeePocTest is Test {
     compounder = FeeCompounder(deployment.feeCompounder);
     relay = IRelay(deployment.relay);
     compounderRelay = IRelay(deployment.compounderRelay);
+    hybrid = FeeMultiHybrid(deployment.feeMultiHybrid);
+    hybridRelay = IRelay(deployment.hybridRelay);
 
     vm.warp(deployment.transfersEnabledAt);
     _depositAlice(relay, 1000e18);
@@ -140,7 +146,7 @@ contract RelayFeePocTest is Test {
     deal(USDC, address(relay), GROSS_REWARD);
 
     vm.expectEmit(true, true, false, true, address(converter));
-    emit FeeEntrypointBase.ManagementFeeTaken(address(relay), USDC, GROSS_REWARD, FEE);
+    emit FeePolicy.ManagementFeeTaken(address(relay), USDC, GROSS_REWARD, FEE);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
 
@@ -150,14 +156,16 @@ contract RelayFeePocTest is Test {
     assertEq(IERC20(address(relay.principalToken())).balanceOf(manager), 0, 'manager receives no principal tokens');
   }
 
-  function test_feeOwnerCanUpdateRecipientForBothEntrypoints() public {
+  function test_feeOwnerCanUpdateRecipientForAllEntrypoints() public {
     address newRecipient = makeAddr('newFeeRecipient');
     vm.startPrank(address(deploymentScript));
     converter.setFeeRecipient(newRecipient);
     compounder.setFeeRecipient(newRecipient);
+    hybrid.setFeeRecipient(newRecipient);
     vm.stopPrank();
 
     deal(USDC, address(relay), GROSS_REWARD);
+    deal(USDC, address(hybridRelay), GROSS_REWARD);
     uint256 tokenGross = 11_000e18;
     vm.prank(address(deploymentScript));
     assertTrue(
@@ -167,11 +175,12 @@ contract RelayFeePocTest is Test {
     vm.startPrank(keeper);
     converter.convertIdleBalance(address(relay));
     compounder.compoundIdleBalance(address(compounderRelay));
+    hybrid.convertIdleBalance(address(hybridRelay), USDC);
     vm.stopPrank();
 
-    assertEq(IERC20(USDC).balanceOf(newRecipient), FEE, 'new recipient receives converter fee');
+    assertEq(IERC20(USDC).balanceOf(newRecipient), FEE * 2, 'new recipient receives both converter fees');
     assertEq(IERC20(deployment.token).balanceOf(newRecipient), tokenGross / 10, 'new recipient receives compounder fee');
-    assertEq(IERC20(USDC).balanceOf(manager), 0, 'old recipient receives no converter fee');
+    assertEq(IERC20(USDC).balanceOf(manager), 0, 'old recipient receives no converter fees');
     assertEq(IERC20(deployment.token).balanceOf(manager), 0, 'old recipient receives no compounder fee');
   }
 
@@ -253,7 +262,7 @@ contract RelayFeePocTest is Test {
 
   function test_constructorRejectsFeeAboveCap() public {
     IFactoryRegistry registry = converter.FACTORY_REGISTRY();
-    vm.expectRevert(abi.encodeWithSelector(FeeEntrypointBase.FeeTooHigh.selector, 5001));
+    vm.expectRevert(abi.encodeWithSelector(FeePolicy.FeeTooHigh.selector, 5001));
     new FeeConverter(registry, USDC, address(this), manager, 5001);
   }
 
@@ -368,6 +377,17 @@ contract RelayFeePocTest is Test {
     assertEq(IERC20(deployment.token).balanceOf(manager), 0, 'failed cross-entrypoint calls move no TOKEN');
   }
 
+  function test_feeMultiHybridRejectsOtherRelaysBeforeTakingFee() public {
+    deal(USDC, address(relay), GROSS_REWARD);
+
+    vm.expectRevert(IMultiEntrypoint.WrongRelay.selector);
+    vm.prank(keeper);
+    hybrid.convertIdleBalance(address(relay), USDC);
+
+    assertEq(IERC20(USDC).balanceOf(manager), 0, 'wrong Relay call pays no fee');
+    assertEq(IERC20(USDC).balanceOf(address(relay)), GROSS_REWARD, 'wrong Relay funds remain untouched');
+  }
+
   /// @notice NFT deposit (setUp) -> configured compounder -> Relay backing grows -> every share appreciates.
   /// @dev The fee-in-cash sibling routes value to holder claims; the compounder instead takes its fee in TOKEN and
   ///      compounds the net into `totalBacking`, so no new shares are minted and each existing share is worth more.
@@ -390,7 +410,7 @@ contract RelayFeePocTest is Test {
     assertTrue(IERC20(token).transfer(address(compounderRelay), gross), 'compounder TOKEN transfer failed');
 
     vm.expectEmit(true, true, false, true, address(configuredCompounder));
-    emit FeeEntrypointBase.ManagementFeeTaken(address(compounderRelay), token, gross, fee);
+    emit FeePolicy.ManagementFeeTaken(address(compounderRelay), token, gross, fee);
     vm.prank(keeper);
     configuredCompounder.compoundIdleBalance(address(compounderRelay));
 
@@ -399,6 +419,84 @@ contract RelayFeePocTest is Test {
     assertEq(
       IERC20(address(compounderRelay.yieldToken())).balanceOf(alice), aliceShares, 'compounding mints no new shares'
     );
+  }
+
+  function test_feeMultiHybridChargesCashAndTokenFees() public {
+    assertTrue(
+      IRelayEntrypoint(address(hybridRelay)).hasAnyRole(address(hybrid), CONVERTER_ROLE),
+      'hybrid must hold CONVERTER role'
+    );
+    assertTrue(
+      IRelayEntrypoint(address(hybridRelay)).hasAnyRole(address(hybrid), COMPOUNDER_ROLE),
+      'hybrid must hold COMPOUNDER role'
+    );
+
+    address token = deployment.token;
+    uint256 tokenGross = 11_000e18;
+    uint256 backingBefore = hybridRelay.totalBacking();
+    deal(USDC, address(hybridRelay), GROSS_REWARD);
+    vm.prank(address(deploymentScript));
+    assertTrue(IERC20(token).transfer(address(hybridRelay), tokenGross), 'hybrid TOKEN transfer failed');
+
+    vm.startPrank(keeper);
+    hybrid.convertIdleBalance(address(hybridRelay), USDC);
+    hybrid.compoundIdleBalance(address(hybridRelay));
+    vm.stopPrank();
+
+    assertEq(IERC20(USDC).balanceOf(manager), FEE, 'hybrid pays the cash fee');
+    assertEq(hybridRelay.accountedBalance(USDC), NET_REWARD, 'hybrid notifies only the cash net');
+    assertEq(IERC20(token).balanceOf(manager), tokenGross / 10, 'hybrid pays the TOKEN fee');
+    assertEq(hybridRelay.totalBacking() - backingBefore, tokenGross * 9 / 10, 'hybrid compounds only the TOKEN net');
+  }
+
+  function test_feeMultiHybridSwapAndConvertChargesOnlyOutputFee() public {
+    uint256 amountIn = 10e18;
+    uint256 amountSpent = 7e18;
+    uint256 swapGross = GROSS_REWARD + 1000;
+    uint256 directGross = 1000e6;
+    SwapRouterStub router = new SwapRouterStub(WETH, USDC, amountSpent, swapGross);
+
+    vm.prank(address(deploymentScript));
+    FactoryRegistry(deployment.factoryRegistry).registerMetaRouter(address(router));
+    deal(WETH, address(hybridRelay), amountIn);
+    deal(USDC, address(hybridRelay), directGross);
+    deal(USDC, address(router), swapGross);
+
+    vm.prank(keeper);
+    hybrid.swapAndConvert(_swapParams(address(hybridRelay), address(router), amountIn, swapGross), USDC);
+
+    uint256 fee = swapGross / 10;
+    uint256 net = swapGross - fee;
+    uint256 accounted = hybridRelay.accountedBalance(USDC);
+    assertEq(IERC20(USDC).balanceOf(manager), fee, 'hybrid fee is based only on measured swap output');
+    assertApproxEqAbs(accounted, net, 1000, 'Relay accounts the notified net within accumulator rounding');
+    assertEq(IERC20(WETH).balanceOf(address(hybridRelay)), amountIn - amountSpent, 'unspent input returns to Relay');
+    assertEq(IERC20(WETH).allowance(address(hybrid), address(router)), 0, 'hybrid router allowance is cleared');
+    assertEq(IERC20(USDC).balanceOf(address(hybridRelay)), directGross + net, 'hybrid preserves direct and net rewards');
+  }
+
+  function test_feeMultiHybridSwapAndCompoundChargesOutputFee() public {
+    address token = deployment.token;
+    uint256 amountIn = 10e18;
+    uint256 amountSpent = 7e18;
+    uint256 gross = 11_000e18;
+    uint256 fee = gross / 10;
+    SwapRouterStub router = new SwapRouterStub(WETH, token, amountSpent, gross);
+
+    vm.prank(address(deploymentScript));
+    FactoryRegistry(deployment.factoryRegistry).registerMetaRouter(address(router));
+    deal(WETH, address(hybridRelay), amountIn);
+    vm.prank(address(deploymentScript));
+    assertTrue(IERC20(token).transfer(address(router), gross), 'hybrid router TOKEN funding failed');
+    uint256 backingBefore = hybridRelay.totalBacking();
+
+    vm.prank(keeper);
+    hybrid.swapAndCompound(_swapParams(address(hybridRelay), address(router), amountIn, gross));
+
+    assertEq(IERC20(token).balanceOf(manager), fee, 'hybrid pays measured TOKEN output fee');
+    assertEq(hybridRelay.totalBacking() - backingBefore, gross - fee, 'hybrid compounds only swap net');
+    assertEq(IERC20(WETH).balanceOf(address(hybridRelay)), amountIn - amountSpent, 'hybrid returns unspent input');
+    assertEq(IERC20(WETH).allowance(address(hybrid), address(router)), 0, 'hybrid clears router allowance');
   }
 
   function test_compounderFeeInTokenAndNetCompounded() public {
@@ -500,7 +598,7 @@ contract RelayFeePocTest is Test {
 
   function test_compounderRejectsFeeAboveCap() public {
     IFactoryRegistry registry = compounder.FACTORY_REGISTRY();
-    vm.expectRevert(abi.encodeWithSelector(FeeEntrypointBase.FeeTooHigh.selector, 5001));
+    vm.expectRevert(abi.encodeWithSelector(FeePolicy.FeeTooHigh.selector, 5001));
     new FeeCompounder(registry, address(this), manager, 5001);
   }
 

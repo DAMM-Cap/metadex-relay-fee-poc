@@ -7,10 +7,11 @@ import {console2} from 'forge-std/console2.sol';
 import {DeployRelayPoc} from '../script/DeployRelayPoc.s.sol';
 import {FeeCompounder} from '../src/FeeCompounder.sol';
 import {FeeConverter} from '../src/FeeConverter.sol';
+import {FeeMultiHybrid} from '../src/FeeMultiHybrid.sol';
 import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import {IRelay} from 'V3/interfaces/relay/IRelay.sol';
 
-/// @notice Narrated, end-to-end cash-fee walkthrough run by `scripts/dev.sh` against its pinned Base-fork Anvil.
+/// @notice Narrated end-to-end walkthrough of all three fee entrypoints against a pinned Base-fork Anvil.
 /// @dev This deliberately uses test cheatcodes. The unmodified token's transfer gate prevents an atomic live
 ///      deployment + relay seed; the fork test is the accurate demonstration of the full flow.
 contract DemoRelayFeeTest is Test {
@@ -109,5 +110,34 @@ contract DemoRelayFeeTest is Test {
 
     assertEq(IERC20(d.token).balanceOf(manager), TOKEN_FEE, 'manager receives compounding fee in TOKEN');
     assertEq(compounderRelay.totalBacking() - backingBefore, TOKEN_NET, 'net compounds into backing');
+
+    // Third path: one bound Protocol L2 entrypoint can convert target rewards or compound TOKEN, charging the same fee
+    // policy before either settlement.
+    IRelay hybridRelay = IRelay(d.hybridRelay);
+    FeeMultiHybrid hybrid = FeeMultiHybrid(d.feeMultiHybrid);
+    uint256 hybridUsdcFeeBefore = IERC20(USDC).balanceOf(manager);
+    uint256 hybridTokenFeeBefore = IERC20(d.token).balanceOf(manager);
+    uint256 hybridBackingBefore = hybridRelay.totalBacking();
+    deal(USDC, d.hybridRelay, GROSS_REWARD);
+    vm.prank(address(deployer));
+    assertTrue(IERC20(d.token).transfer(d.hybridRelay, TOKEN_GROSS), 'hybrid TOKEN funding failed');
+    vm.startPrank(keeper);
+    hybrid.convertIdleBalance(d.hybridRelay, USDC);
+    hybrid.compoundIdleBalance(d.hybridRelay);
+    vm.stopPrank();
+
+    console2.log('');
+    console2.log('--- MetaDEX Protocol L2 hybrid-fee demo ---');
+    console2.log('hybridRelay                  ', d.hybridRelay);
+    console2.log('feeMultiHybrid               ', d.feeMultiHybrid);
+    console2.log('hybrid cash fee              ', IERC20(USDC).balanceOf(manager) - hybridUsdcFeeBefore);
+    console2.log('hybrid TOKEN fee             ', IERC20(d.token).balanceOf(manager) - hybridTokenFeeBefore);
+    console2.log('hybrid backing growth (net)  ', hybridRelay.totalBacking() - hybridBackingBefore);
+    console2.log('--- keeper selects convert or compound per call ---');
+
+    assertEq(IERC20(USDC).balanceOf(manager) - hybridUsdcFeeBefore, FEE, 'hybrid pays cash fee');
+    assertEq(IERC20(d.token).balanceOf(manager) - hybridTokenFeeBefore, TOKEN_FEE, 'hybrid pays TOKEN fee');
+    assertEq(hybridRelay.accountedBalance(USDC), NET_REWARD, 'hybrid accounts only cash net');
+    assertEq(hybridRelay.totalBacking() - hybridBackingBefore, TOKEN_NET, 'hybrid compounds only TOKEN net');
   }
 }

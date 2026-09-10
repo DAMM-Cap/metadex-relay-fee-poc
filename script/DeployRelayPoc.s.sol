@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.36;
 
+import {Clones} from '@openzeppelin/contracts/proxy/Clones.sol';
 import {Script} from 'forge-std/Script.sol';
 
 import {FeeCompounder} from '../src/FeeCompounder.sol';
 import {FeeConverter} from '../src/FeeConverter.sol';
+import {FeeMultiHybrid} from '../src/FeeMultiHybrid.sol';
 import {VeArtProxy} from 'V3/art/VeArtProxy.sol';
 import {RootMessageOrchestrator} from 'V3/bridge/RootMessageOrchestrator.sol';
 import {VotingEscrow} from 'V3/core/VotingEscrow.sol';
@@ -32,7 +34,7 @@ import {VoterPaymentsModule} from 'V3/vpm/VoterPaymentsModule.sol';
 /// @dev The idle proof never reads governance. This stub only satisfies RelayFactory's non-zero dependency.
 contract GovernorStub {}
 
-/// @notice Deploys a root-only MetaDEX stack plus unmodified MaxiRelays and DAMM's two fee entrypoints for fork tests.
+/// @notice Deploys a root-only MetaDEX stack, two MaxiRelays, a Protocol L2 Relay, and three fee entrypoints.
 contract DeployRelayPoc is Script {
   uint256 public constant BASE_CHAIN_ID = 8453;
   uint256 public constant FORK_BLOCK = 50_718_500;
@@ -50,6 +52,7 @@ contract DeployRelayPoc is Script {
   error RelaySmokeFailed(address relay);
   error ConverterRoleMissing(address converter);
   error CompounderRoleMissing(address compounder);
+  error HybridRelayMismatch(address expected, address actual);
 
   struct Actors {
     address deployer;
@@ -68,8 +71,10 @@ contract DeployRelayPoc is Script {
     address factoryRegistry;
     address feeConverter;
     address feeCompounder;
+    address feeMultiHybrid;
     address relay;
     address compounderRelay;
+    address hybridRelay;
     address manager;
     address keeper;
     address strategist;
@@ -185,6 +190,23 @@ contract DeployRelayPoc is Script {
     FeeCompounder feeCompounder =
       new FeeCompounder(factoryRegistry, actors.deployer, actors.manager, MANAGEMENT_FEE_BPS);
 
+    bytes32 hybridSalt = keccak256('metadex-relay-fee-poc-hybrid');
+    bytes32 scopedHybridSalt = keccak256(abi.encodePacked(address(this), hybridSalt));
+    address predictedHybridRelay =
+      Clones.predictDeterministicAddress(address(protocolImplementation), scopedHybridSalt, address(relayFactory));
+    address[] memory hybridTargets = new address[](1);
+    hybridTargets[0] = USDC;
+    FeeMultiHybrid feeMultiHybrid = new FeeMultiHybrid(
+      factoryRegistry,
+      IRelayEntrypoint(predictedHybridRelay),
+      hybridTargets,
+      new address[](0),
+      MAX_PIPS / 2,
+      actors.deployer,
+      actors.manager,
+      MANAGEMENT_FEE_BPS
+    );
+
     // TOKEN transfers stay gated until one week after migration opens. The seed stake below routes TOKEN through
     // the non-exempt RelayFactory, so advance the clock to the enable time before any relay is seeded.
     vm.warp(uint256(migrationOpen) + 1 weeks);
@@ -262,6 +284,47 @@ contract DeployRelayPoc is Script {
       revert CompounderRoleMissing(address(feeCompounder));
     }
 
+    // MultiHybrid is bound to one Protocol L2 Relay. Predicting the deterministic clone address breaks the
+    // constructor cycle, so the Relay can attach the same entrypoint to both roles during initialization.
+    token.approve(address(relayFactory), SEED_AMOUNT);
+    (address hybridRelay,) = relayFactory.createProtocolRelay(
+      IRelayFactory.CreateParams({
+        admin: actors.deployer,
+        keeper: actors.keeper,
+        voter: actors.strategist,
+        compounder: address(feeMultiHybrid),
+        converter: address(feeMultiHybrid),
+        bootstrapOwner: actors.treasury,
+        rewardToken: USDC,
+        entrypointVetoer: address(0),
+        seedAmount: SEED_AMOUNT,
+        isPermanent: true,
+        ytTransferable: false,
+        stakingWeeks: 0,
+        salt: hybridSalt,
+        config: IRelay.RelayConfig({
+          tokenId: 0,
+          minDeposit: 1e18,
+          keeperWindow: 1 days,
+          minWithdrawal: 1e18,
+          entrypointTimelock: 2 days,
+          lockWeeks: 0,
+          evacuationWindow: 7 days,
+          name: 'DAMM Hybrid Relay',
+          symbol: 'dHREL'
+        })
+      }),
+      true
+    );
+    if (!relayFactory.isRelay(hybridRelay)) revert RelaySmokeFailed(hybridRelay);
+    if (hybridRelay != predictedHybridRelay) revert HybridRelayMismatch(predictedHybridRelay, hybridRelay);
+    if (!IRelayEntrypoint(hybridRelay).hasAnyRole(address(feeMultiHybrid), CONVERTER_ROLE)) {
+      revert ConverterRoleMissing(address(feeMultiHybrid));
+    }
+    if (!IRelayEntrypoint(hybridRelay).hasAnyRole(address(feeMultiHybrid), COMPOUNDER_ROLE)) {
+      revert CompounderRoleMissing(address(feeMultiHybrid));
+    }
+
     deployment = Deployment({
       token: address(token),
       votingEscrow: address(votingEscrow),
@@ -271,8 +334,10 @@ contract DeployRelayPoc is Script {
       factoryRegistry: address(factoryRegistry),
       relay: relay,
       compounderRelay: compounderRelay,
+      hybridRelay: hybridRelay,
       feeConverter: address(feeConverter),
       feeCompounder: address(feeCompounder),
+      feeMultiHybrid: address(feeMultiHybrid),
       manager: actors.manager,
       keeper: actors.keeper,
       strategist: actors.strategist,
