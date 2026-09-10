@@ -42,13 +42,13 @@ forge test --match-path test/RelayFeePoc.t.sol -vv
 forge test --match-path test/RelayFeePoc.t.sol --gas-report
 ```
 
-The eighteen tests cover both paths: the complete NFT-deposit → configured-entrypoint → Relay flow; cash-fee settlement with net pro-rata claims; fee-in-TOKEN with net compounding; parity with Dromos `SingleConverter`/`Compounder` at 0 bps; keeper, empty-balance, fee-cap, and cross-Relay role guards; repeated reward rounds without charging accumulator dust twice; and both swap lanes through an approved deterministic router, including fee bases, input refunds, and allowance cleanup.
+The eighteen tests cover both paths: the complete NFT-deposit → configured-entrypoint → Relay flow; cash-fee settlement with net pro-rata claims; fee-in-TOKEN with net compounding; parity with Dromos `SingleConverter`/`Compounder` at 0 bps; keeper, empty-balance, fee-cap, and cross-Relay role guards; repeated reward rounds with consistent cross-round accounting; and both swap lanes through an approved deterministic router, including fee bases, input refunds, and allowance cleanup.
 
 Observed on the pinned fork:
 
 - converter: `11,000 USDC` gross → `1,100 USDC` manager cash fee (10%) → `9,900 USDC` to holders (`9,000` treasury + `900` Alice);
 - compounder: `11,000 TOKEN` gross → `1,100 TOKEN` manager fee (10%) → `9,900 TOKEN` compounded into backing, no new shares;
-- `FeeConverter` charges accumulator rounding residue at most once, including across mixed direct-reward and swap rounds.
+- both entrypoints follow the stock Dromos idle/swap shapes: the idle path fees the Relay's whole unaccounted balance (so recycled accumulator residue is fee-bearing), and the swap path fees only the measured swap output.
 
 ## Narrated local demo
 

@@ -2,7 +2,6 @@
 // Modified by DAMM Capital in 2026 to centralize fee configuration and Relay settlement.
 pragma solidity 0.8.36;
 
-import {IERC20} from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import {Math} from '@openzeppelin/contracts/utils/math/Math.sol';
 import {SafeTransferLib} from '@solady/utils/SafeTransferLib.sol';
 
@@ -31,10 +30,6 @@ abstract contract FeeEntrypointBase is BaseEntrypoint {
 
     FEE_RECIPIENT = feeRecipient;
     FEE_BPS = feeBps;
-  }
-
-  function _idleBalance(address relay, address token) internal view returns (uint256) {
-    return IERC20(token).balanceOf(relay) - IRelayEntrypoint(relay).accountedBalance(token);
   }
 
   function _takeFeeFromRelay(address relay, address token, uint256 feeBase) internal returns (uint256 fee) {

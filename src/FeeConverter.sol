@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LicenseRef-Dromos-Restricted-Use-1.0
-// Modified by DAMM Capital in 2026 to add manager-fee settlement and fee-exempt dust accounting.
+// Modified by DAMM Capital in 2026 to add manager-fee settlement.
 pragma solidity 0.8.36;
 
 import {IFactoryRegistry} from 'V3/interfaces/factories/IFactoryRegistry.sol';
@@ -14,12 +14,6 @@ import {FeeEntrypointBase} from './FeeEntrypointBase.sol';
 contract FeeConverter is FeeEntrypointBase, ISingleConverter {
   address public immutable override TARGET_TOKEN;
 
-  /// @dev Accumulator rounding residue has already passed through the fee split. Tracking it prevents the next
-  ///      idle conversion from charging that same value again.
-  mapping(address relay => uint256 amount) private _feeExemptDust;
-
-  error TrackedDustExceedsIdleBalance(address relay, uint256 trackedDust, uint256 idleBalance);
-
   constructor(
     IFactoryRegistry registry,
     address tokenOut,
@@ -30,40 +24,22 @@ contract FeeConverter is FeeEntrypointBase, ISingleConverter {
     TARGET_TOKEN = tokenOut;
   }
 
-  /// @notice Skims the management fee from newly arrived target tokens, then notifies all fee-paid idle rewards.
+  /// @notice Skims the management fee from the Relay's whole unaccounted target-token balance, then notifies net.
+  /// @dev Mirrors Dromos `SingleConverter.convertIdleBalance`, inserting only the fee split before `notifyReward`.
   function convertIdleBalance(address relay) external override nonReentrant {
     _requireKeeper(relay);
-
     uint256 gross = _requireIdleBalance(relay, TARGET_TOKEN);
-    uint256 trackedDust = _trackedDust(relay, gross);
-    uint256 fee = _takeFeeFromRelay(relay, TARGET_TOKEN, gross - trackedDust);
+    uint256 fee = _takeFeeFromRelay(relay, TARGET_TOKEN, gross);
     IRelayEntrypoint(relay).notifyReward(TARGET_TOKEN, gross - fee);
-    _feeExemptDust[relay] = _idleBalance(relay, TARGET_TOKEN);
-
     emit ManagementFeeTaken(relay, TARGET_TOKEN, gross, fee);
   }
 
   /// @notice Swaps a Relay reward token into the target token, skims the fee from the measured output, and notifies net.
+  /// @dev Mirrors Dromos `SingleConverter.swapAndConvert`, inserting only the fee split before `notifyReward`.
   function swapAndConvert(IBaseEntrypoint.SwapParams calldata params) external override nonReentrant {
     uint256 gross = _pullSwapAndValidate(params, TARGET_TOKEN);
-
-    // `_pullSwapAndValidate` has already transferred `gross` to the Relay. Subtracting it recovers the target-token
-    // idle balance that predated this swap, so unrelated direct rewards remain fee-bearing for the idle path.
-    uint256 idleBeforeSwap = _idleBalance(params.relay, TARGET_TOKEN) - gross;
-    uint256 trackedDust = _trackedDust(params.relay, idleBeforeSwap);
     uint256 fee = _takeFeeFromRelay(params.relay, TARGET_TOKEN, gross);
     IRelayEntrypoint(params.relay).notifyReward(TARGET_TOKEN, gross - fee);
-
-    uint256 idleAfterSwap = _idleBalance(params.relay, TARGET_TOKEN);
-    _feeExemptDust[params.relay] = trackedDust + (idleAfterSwap - idleBeforeSwap);
-
     emit ManagementFeeTaken(params.relay, TARGET_TOKEN, gross, fee);
-  }
-
-  function _trackedDust(address relay, uint256 idleBalance) private view returns (uint256 trackedDust) {
-    trackedDust = _feeExemptDust[relay];
-    if (trackedDust > idleBalance) {
-      revert TrackedDustExceedsIdleBalance(relay, trackedDust, idleBalance);
-    }
   }
 }

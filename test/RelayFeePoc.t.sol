@@ -223,24 +223,24 @@ contract RelayFeePocTest is Test {
     vm.prank(alice);
     uint256 aliceFirst = relay.claim(USDC, alice);
 
-    // Fresh second-round reward stacked on top of the still-unclaimed first round.
+    // Fresh second-round reward stacked on top of the still-unclaimed first round plus its accumulator residue.
     uint256 secondGross = 1000e6;
     deal(USDC, address(relay), IERC20(USDC).balanceOf(address(relay)) + secondGross);
+    uint256 secondIdleBalance = IERC20(USDC).balanceOf(address(relay)) - relay.accountedBalance(USDC);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
 
-    // Fee is 10% of each round's gross, banked across rounds.
-    assertEq(IERC20(USDC).balanceOf(manager), FEE + secondGross / 10, 'fee is banked across rounds');
+    // Like the stock converters, each round fees the whole unaccounted idle balance.
+    assertEq(IERC20(USDC).balanceOf(manager), FEE + secondIdleBalance / 10, 'fee is banked across rounds');
 
     vm.prank(treasury);
     uint256 treasuryClaim = relay.claim(USDC, treasury);
     vm.prank(alice);
     uint256 aliceSecond = relay.claim(USDC, alice);
 
-    // Holders draw both rounds' net down to accumulator dust: notifyReward accounts the share-divisible part and
-    // strands the sub-unit remainder per round (documented "rounded up, rest un-accounted" behaviour). Two rounds
-    // over an ~11e18 YT supply leave well under a cent of 6-decimal USDC un-drawn.
-    uint256 netTotal = NET_REWARD + (secondGross - secondGross / 10);
+    // Holders draw everything that ever arrived, minus the fees taken and the sub-unit accumulator residue that
+    // notifyReward strands each round. Two rounds over an ~11e18 YT supply leave well under a cent of 6-decimal USDC.
+    uint256 netTotal = (GROSS_REWARD + secondGross) - IERC20(USDC).balanceOf(manager);
     uint256 dust = 10_000; // 0.01 USDC
     assertApproxEqAbs(
       aliceFirst + aliceSecond + treasuryClaim, netTotal, dust, 'holders draw both rounds net minus dust'
@@ -248,27 +248,26 @@ contract RelayFeePocTest is Test {
     assertApproxEqAbs(relay.accountedBalance(USDC), 0, dust, 'accounting clears to dust after claims');
   }
 
-  function test_converterDoesNotChargePriorRoundDustAgain() public {
-    // `notifyReward` leaves the sub-index remainder unaccounted. That remainder has already passed through the
-    // management-fee calculation and must not become fee-bearing again when the next reward arrives.
+  function test_converterFeesWholeIdleBalanceIncludingPriorRoundResidue() public {
     uint256 firstGross = GROSS_REWARD + 1000;
     deal(USDC, address(relay), firstGross);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
 
     uint256 firstFee = IERC20(USDC).balanceOf(manager);
-    uint256 priorDust = IERC20(USDC).balanceOf(address(relay)) - relay.accountedBalance(USDC);
-    assertGe(priorDust, 10, 'fixture must leave fee-relevant prior-round dust');
+    uint256 priorResidue = IERC20(USDC).balanceOf(address(relay)) - relay.accountedBalance(USDC);
+    assertGe(priorResidue, 10, 'fixture must leave fee-relevant prior-round residue');
 
     uint256 secondGross = 1000e6;
     deal(USDC, address(relay), IERC20(USDC).balanceOf(address(relay)) + secondGross);
+    uint256 secondIdleBalance = IERC20(USDC).balanceOf(address(relay)) - relay.accountedBalance(USDC);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
 
     assertEq(
       IERC20(USDC).balanceOf(manager) - firstFee,
-      secondGross / 10,
-      'prior-round dust must not be charged a second management fee'
+      secondIdleBalance / 10,
+      'fee must cover the whole idle balance like stock converters'
     );
   }
 
@@ -293,12 +292,13 @@ contract RelayFeePocTest is Test {
     assertEq(IERC20(WETH).balanceOf(address(relay)), amountIn - amountSpent, 'unspent input returns to Relay');
     assertEq(IERC20(WETH).allowance(address(converter), address(router)), 0, 'router allowance is cleared');
 
+    uint256 idleBalance = IERC20(USDC).balanceOf(address(relay)) - relay.accountedBalance(USDC);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
     assertEq(
       IERC20(USDC).balanceOf(manager) - swapFee,
-      directGross / 10,
-      'later idle conversion charges the direct reward but not swap-round dust'
+      idleBalance / 10,
+      'later idle conversion fees the whole unaccounted balance, including swap-round residue'
     );
   }
 

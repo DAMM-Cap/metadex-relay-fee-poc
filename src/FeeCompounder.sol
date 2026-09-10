@@ -20,6 +20,7 @@ contract FeeCompounder is FeeEntrypointBase, ICompounder {
   ) FeeEntrypointBase(registry, feeRecipient, feeBps) {}
 
   /// @notice Skims the management fee from the Relay's unaccounted TOKEN balance, then compounds the net into backing.
+  /// @dev Mirrors Dromos `Compounder.compoundIdleBalance`, inserting only the fee split before `compound`.
   function compoundIdleBalance(address relay) external override nonReentrant {
     _requireKeeper(relay);
 
@@ -32,6 +33,7 @@ contract FeeCompounder is FeeEntrypointBase, ICompounder {
   }
 
   /// @notice Swaps a Relay reward token into TOKEN, skims the fee from the measured output, then compounds the net.
+  /// @dev Mirrors Dromos `Compounder.swapAndCompound`, inserting only the fee split before `compound`.
   function swapAndCompound(IBaseEntrypoint.SwapParams calldata params) external override nonReentrant {
     address token = IRelayEntrypoint(params.relay).TOKEN();
     uint256 gross = _pullSwapAndValidate(params, token);
