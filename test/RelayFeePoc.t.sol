@@ -10,6 +10,9 @@ import {IRelay} from 'V3/interfaces/relay/IRelay.sol';
 import {IRelayFactory} from 'V3/interfaces/relay/IRelayFactory.sol';
 import {SingleConverter} from 'V3/relay/entrypoints/SingleConverter.sol';
 import {IFactoryRegistry} from 'V3/interfaces/factories/IFactoryRegistry.sol';
+import {ISingleConverter} from 'V3/interfaces/relay/entrypoints/ISingleConverter.sol';
+import {IRelayEntrypoint} from 'V3/interfaces/relay/IRelayEntrypoint.sol';
+import {IBaseEntrypoint} from 'V3/interfaces/relay/entrypoints/IBaseEntrypoint.sol';
 
 contract RelayFeePocTest is Test {
   address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -59,6 +62,34 @@ contract RelayFeePocTest is Test {
     vm.stopPrank();
     vm.prank(keeper);
     relay.processPending(1);
+  }
+
+  /// @notice NFT deposit (setUp) -> configured converter -> Relay accumulator -> holder claims.
+  /// @dev MetaDEX's keeper invokes its configured converter; the converter then enters the Relay through
+  ///      CONVERTER-gated `pull` and `notifyReward`. Relay has no callback that dispatches into a converter.
+  function test_nftDepositToHolderClaimThroughConfiguredConverter() public {
+    ISingleConverter configuredConverter = converter;
+    assertTrue(
+      IRelayEntrypoint(address(relay)).hasAnyRole(address(configuredConverter), 1 << 3),
+      'factory must attach converter with CONVERTER role'
+    );
+    assertGt(IERC20(address(relay.yieldToken())).balanceOf(alice), 0, 'NFT deposit must mint Alice yield shares');
+
+    deal(USDC, address(relay), GROSS_REWARD);
+    vm.expectEmit(true, false, false, false, address(relay));
+    emit IRelay.RewardNotified(USDC, 0, 0);
+    vm.prank(keeper);
+    configuredConverter.convertIdleBalance(address(relay));
+
+    assertEq(IERC20(USDC).balanceOf(manager), FEE, 'configured converter pays manager in cash');
+    assertEq(relay.accountedBalance(USDC), NET_REWARD, 'Relay records only the notified net reward');
+
+    vm.prank(treasury);
+    uint256 treasuryClaim = relay.claim(USDC, treasury);
+    vm.prank(alice);
+    uint256 aliceClaim = relay.claim(USDC, alice);
+    assertGt(aliceClaim, 0, 'NFT depositor claims a non-zero net reward');
+    assertApproxEqAbs(treasuryClaim + aliceClaim, NET_REWARD, 1, 'holders claim the Relay-notified net reward');
   }
 
   function test_feeIsCashOutAndNetIsAccounted() public {
@@ -126,12 +157,12 @@ contract RelayFeePocTest is Test {
   function test_revertsWhenNotKeeper() public {
     deal(USDC, address(relay), GROSS_REWARD);
 
-    vm.expectRevert(FeeConverter.NotKeeper.selector);
+    vm.expectRevert(IBaseEntrypoint.NotKeeper.selector);
     converter.convertIdleBalance(address(relay));
   }
 
   function test_revertsWhenNoIdleBalance() public {
-    vm.expectRevert(FeeConverter.NoIdleBalance.selector);
+    vm.expectRevert(IBaseEntrypoint.NoIdleBalance.selector);
     vm.prank(keeper);
     converter.convertIdleBalance(address(relay));
   }

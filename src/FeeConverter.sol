@@ -9,28 +9,22 @@ import {IFactoryRegistry} from 'V3/interfaces/factories/IFactoryRegistry.sol';
 import {IMetarouter} from 'V3/interfaces/metarouter/IMetarouter.sol';
 import {IRelayEntrypoint} from 'V3/interfaces/relay/IRelayEntrypoint.sol';
 import {IBaseEntrypoint} from 'V3/interfaces/relay/entrypoints/IBaseEntrypoint.sol';
+import {ISingleConverter} from 'V3/interfaces/relay/entrypoints/ISingleConverter.sol';
 
 /// @notice A Relay converter that pays a bounded cash management fee before accounting rewards to holders.
 /// @dev This contract is only for private evaluation with Dromos; it does not modify any Dromos contract.
-contract FeeConverter is ReentrancyGuardTransient {
+contract FeeConverter is ISingleConverter, ReentrancyGuardTransient {
   using SafeTransferLib for address;
 
   uint256 public constant MAX_FEE_BPS = 5_000;
   uint256 internal constant BPS_DENOMINATOR = 10_000;
 
-  IFactoryRegistry public immutable FACTORY_REGISTRY;
-  address public immutable TARGET_TOKEN;
+  IFactoryRegistry public immutable override FACTORY_REGISTRY;
+  address public immutable override TARGET_TOKEN;
   address public immutable FEE_RECIPIENT;
   uint256 public immutable FEE_BPS;
 
   error FeeTooHigh(uint256 feeBps);
-  error InsufficientOutput();
-  error NoIdleBalance();
-  error NotKeeper();
-  error RouterNotApproved();
-  error SameToken();
-  error ZeroAddress();
-  error ZeroMinOut();
 
   event ManagementFeeTaken(address indexed relay, address indexed token, uint256 gross, uint256 fee);
 
@@ -45,7 +39,7 @@ contract FeeConverter is ReentrancyGuardTransient {
   }
 
   /// @notice Skims the management fee from the Relay's unaccounted target-token balance, then notifies net rewards.
-  function convertIdleBalance(address relay) external nonReentrant {
+  function convertIdleBalance(address relay) external override nonReentrant {
     _requireKeeper(relay);
 
     uint256 gross = _idleBalance(relay, TARGET_TOKEN);
@@ -58,7 +52,7 @@ contract FeeConverter is ReentrancyGuardTransient {
   }
 
   /// @notice Swaps a Relay reward token into the target token, skims the fee from the measured output, and notifies net.
-  function swapAndConvert(IBaseEntrypoint.SwapParams calldata params) external nonReentrant {
+  function swapAndConvert(IBaseEntrypoint.SwapParams calldata params) external override nonReentrant {
     _requireKeeper(params.relay);
     if (params.minAmountOut == 0) revert ZeroMinOut();
     if (!FACTORY_REGISTRY.isMetaRouterApproved(params.router)) revert RouterNotApproved();

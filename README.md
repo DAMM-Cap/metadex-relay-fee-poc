@@ -4,14 +4,14 @@ Private evaluation artifact for Dromos Labs and DAMM Capital. The vendored MetaD
 
 ## Claim proved
 
-`FeeConverter` is a custom Relay entrypoint that holds the unmodified `MaxiRelay`'s `CONVERTER` role. On a real Base fork it:
+`FeeConverter` implements Dromos `ISingleConverter` and is a custom Relay entrypoint that holds the unmodified `MaxiRelay`'s `CONVERTER` role. On a real Base fork it:
 
 1. measures USDC that is on the Relay but not yet accounted;
 2. pulls a bounded manager fee from the Relay and transfers that fee as USDC to `FEE_RECIPIENT`;
 3. calls `notifyReward` with the remainder; and
 4. lets Relay holders claim the net reward pro rata.
 
-The core proof forks Base at block `50,718,500`, deploys a fresh root-only MetaDEX stack, VPM, factory, real `MaxiRelay`, and `FeeConverter`; no VE/Voter/VPM mocks are used.
+The core proof forks Base at block `50,718,500`, deploys a fresh root-only MetaDEX stack, VPM, factory, real `MaxiRelay`, and `FeeConverter`; no VE/Voter/VPM mocks are used. It includes the full protocol call topology: NFT deposit → keeper calls the configured `ISingleConverter` entrypoint → entrypoint calls Relay `pull`/`notifyReward` → holders claim the net reward. MetaDEX deliberately has no Relay callback that dispatches into an entrypoint.
 
 ## Setup
 
@@ -32,7 +32,7 @@ forge test --match-path test/RelayFeePoc.t.sol -vv
 forge test --match-path test/RelayFeePoc.t.sol --gas-report
 ```
 
-The seven tests cover cash-fee settlement, net pro-rata claims, parity with Dromos `SingleConverter` at 0 bps, keeper and empty-balance guards, the 50% fee cap, and repeated reward rounds after a partial claim.
+The eight tests cover the complete NFT-deposit → configured-converter → Relay-notification → holder-claim flow, cash-fee settlement, net pro-rata claims, parity with Dromos `SingleConverter` at 0 bps, keeper and empty-balance guards, the 50% fee cap, and repeated reward rounds after a partial claim.
 
 Observed on the pinned fork:
 
