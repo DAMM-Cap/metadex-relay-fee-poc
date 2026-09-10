@@ -1,0 +1,38 @@
+[fmt]
+line_length = 120
+tab_width = 2
+bracket_spacing = false
+int_types = 'long'
+quote_style = 'single'
+number_underscore = 'thousands'
+multiline_func_header = 'params_first_multi'
+sort_imports = true
+
+[profile.default]
+solc_version = '0.8.36'
+evm_version = 'prague'
+libs = ['node_modules', 'vendor/metadex-public/node_modules']
+optimizer_runs = 10_000
+via_ir = true
+auto_detect_remappings = false
+remappings = [
+  '@hyperlane-xyz/core/=vendor/metadex-public/node_modules/@hyperlane-xyz/core/',
+  '@nomad-xyz/excessively-safe-call/=vendor/metadex-public/node_modules/@nomad-xyz/excessively-safe-call/',
+  '@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/',
+  '@solady/=node_modules/solady/src/',
+  'forge-std/=node_modules/forge-std/src/',
+  'solady/=node_modules/solady/src/',
+  'V3/=vendor/metadex-public/V3/src/',
+]
+additional_compiler_profiles = [{name = 'voting-escrow', optimizer_runs = 1000}]
+compilation_restrictions = [{paths = 'vendor/metadex-public/V3/src/core/VotingEscrow.sol', optimizer_runs = 1000}]
+
+[rpc_endpoints]
+base = '${BASE_RPC}'
+
+[profile.test]
+via_ir = true
+out = 'out-via-ir'
+
+[fuzz]
+runs = 1000
