@@ -18,6 +18,7 @@ import {IRelayFactory} from 'V3/interfaces/relay/IRelayFactory.sol';
 import {IBaseEntrypoint} from 'V3/interfaces/relay/entrypoints/IBaseEntrypoint.sol';
 import {ICompounder} from 'V3/interfaces/relay/entrypoints/ICompounder.sol';
 import {IMultiEntrypoint} from 'V3/interfaces/relay/entrypoints/IMultiEntrypoint.sol';
+import {IRelayToken} from 'V3/interfaces/relay/IRelayToken.sol';
 import {ISingleConverter} from 'V3/interfaces/relay/entrypoints/ISingleConverter.sol';
 import {Compounder} from 'V3/relay/entrypoints/Compounder.sol';
 import {SingleConverter} from 'V3/relay/entrypoints/SingleConverter.sol';
@@ -43,6 +44,11 @@ contract SwapRouterStub {
     if (!IERC20(INPUT_TOKEN).transferFrom(msg.sender, address(this), SPEND_AMOUNT)) revert TransferFailed();
     if (!IERC20(OUTPUT_TOKEN).transfer(msg.sender, OUTPUT_AMOUNT)) revert TransferFailed();
   }
+}
+
+/// @dev Minimal view of ProtocolRelay's allow-list, which gates deposits and share transfers on L2 Relays.
+interface IAllowListRelay {
+  function setAllowList(address account, bool allowed) external;
 }
 
 contract RelayFeePocTest is Test {
@@ -600,6 +606,120 @@ contract RelayFeePocTest is Test {
     IFactoryRegistry registry = compounder.FACTORY_REGISTRY();
     vm.expectRevert(abi.encodeWithSelector(FeePolicy.FeeTooHigh.selector, 5001));
     new FeeCompounder(registry, address(this), manager, 5001);
+  }
+
+  /// @notice The hybrid convert side gates the output token by the mutable target set: a token that was
+  ///         never a target is rejected, and once the L2 admin retargets, the retired token is rejected too.
+  /// @dev `_requireTarget` runs before any balance read or fee, so the guard cannot leak value on a bad token.
+  function test_hybridConvertRejectsNonTargetOutputTokens() public {
+    // WETH is not in the deploy-time target set ([USDC]), so converting to it reverts before any settlement.
+    vm.prank(keeper);
+    vm.expectRevert(IMultiEntrypoint.NotTargetToken.selector);
+    hybrid.convertIdleBalance(address(hybridRelay), WETH);
+
+    // The bound Relay's owner (the L2 admin) rotates the target set from USDC to WETH.
+    address relayOwner = IRelayEntrypoint(address(hybridRelay)).owner();
+    vm.startPrank(relayOwner);
+    hybrid.addTargetToken(WETH);
+    hybrid.removeTargetToken(USDC);
+    vm.stopPrank();
+
+    // The retired token is now rejected on the same path.
+    vm.prank(keeper);
+    vm.expectRevert(IMultiEntrypoint.NotTargetToken.selector);
+    hybrid.convertIdleBalance(address(hybridRelay), USDC);
+  }
+
+  /// @notice Full hybrid lifecycle on the Protocol L2 Relay: a real user deposit, a management round that
+  ///         converts idle USDC, an owner-driven switch of the convert output token to WETH (target set plus
+  ///         reward registry), a second management round that converts idle WETH, holder claims in BOTH
+  ///         output tokens, and a user exit that burns the pair and drains the queue.
+  /// @dev Proves the switched output token settles end to end: after retargeting, the fee is taken and the net
+  ///      is notified in WETH, and holders draw valid pro-rata claims in the new token while the pre-switch
+  ///      USDC reward stays claimable.
+  function test_hybridEndToEndDepositSwitchTargetAndWithdraw() public {
+    // --- User onboarding: the Protocol L2 Relay gates deposits by an allow-list, so the L2 admin lists Alice
+    //     before she stakes a fresh veNFT and becomes a real share holder.
+    address relayOwner = IRelayEntrypoint(address(hybridRelay)).owner();
+    vm.prank(relayOwner);
+    IAllowListRelay(address(hybridRelay)).setAllowList(alice, true);
+    _depositAlice(hybridRelay, 1000e18);
+    IRelayToken hybridPT = hybridRelay.principalToken();
+    IRelayToken hybridYT = hybridRelay.yieldToken();
+    uint256 aliceShares = hybridPT.balanceOf(alice);
+    assertGt(aliceShares, 0, 'alice holds hybrid principal after deposit');
+    assertEq(hybridYT.balanceOf(alice), aliceShares, 'deposit mints the PT/YT pair');
+
+    // --- Management round 1: convert idle USDC. Fee to manager in USDC, net notified to holders in USDC.
+    deal(USDC, address(hybridRelay), GROSS_REWARD);
+    vm.prank(keeper);
+    hybrid.convertIdleBalance(address(hybridRelay), USDC);
+    assertEq(IERC20(USDC).balanceOf(manager), FEE, 'round 1 charges the cash fee in USDC');
+    assertEq(hybridRelay.accountedBalance(USDC), NET_REWARD, 'round 1 notifies the USDC net');
+
+    // --- Output-token switch: the L2 admin retargets to WETH and the keeper registers WETH as a reward token
+    //     so the accumulator can settle it. Both steps are required for the new output token to pay holders.
+    // (relayOwner resolved above.)
+    vm.startPrank(relayOwner);
+    hybrid.removeTargetToken(USDC);
+    hybrid.addTargetToken(WETH);
+    vm.stopPrank();
+    vm.prank(keeper);
+    hybridRelay.addRewardToken(WETH);
+    assertFalse(hybrid.isTargetToken(USDC), 'USDC retired as convert target');
+    assertTrue(hybrid.isTargetToken(WETH), 'WETH is the new convert target');
+    assertTrue(hybridRelay.isRewardToken(WETH), 'WETH registered so the accumulator settles it');
+
+    // Guard: with USDC retired, the keeper can no longer convert into it.
+    vm.prank(keeper);
+    vm.expectRevert(IMultiEntrypoint.NotTargetToken.selector);
+    hybrid.convertIdleBalance(address(hybridRelay), USDC);
+
+    // --- Management round 2: convert idle WETH. Fee to manager in WETH, net notified to holders in WETH.
+    uint256 wethGross = 4e18;
+    uint256 wethFee = wethGross / 10; // MANAGEMENT_FEE_BPS = 1000 bps.
+    uint256 wethNet = wethGross - wethFee;
+    deal(WETH, address(hybridRelay), wethGross);
+    vm.prank(keeper);
+    hybrid.convertIdleBalance(address(hybridRelay), WETH);
+    assertEq(IERC20(WETH).balanceOf(manager), wethFee, 'round 2 charges the fee in the new output token');
+    // notifyReward floors the per-share accumulator, stranding sub-unit dust as recoverable idle balance.
+    uint256 wethDust = 1e7;
+    assertApproxEqAbs(hybridRelay.accountedBalance(WETH), wethNet, wethDust, 'round 2 notifies the WETH net');
+
+    // --- Holder claims in BOTH output tokens: the pre-switch USDC reward stays claimable, and the post-switch
+    //     WETH reward pays out pro rata over the same yield-token supply.
+    vm.prank(alice);
+    uint256 aliceUsdc = hybridRelay.claim(USDC, alice);
+    vm.prank(treasury);
+    uint256 treasuryUsdc = hybridRelay.claim(USDC, treasury);
+    assertGt(aliceUsdc, 0, 'alice claims a non-zero USDC reward');
+    assertApproxEqAbs(aliceUsdc + treasuryUsdc, NET_REWARD, 2, 'holders claim the USDC net');
+    assertEq(IERC20(USDC).balanceOf(alice), aliceUsdc, 'alice receives the claimed USDC');
+
+    vm.prank(alice);
+    uint256 aliceWeth = hybridRelay.claim(WETH, alice);
+    vm.prank(treasury);
+    uint256 treasuryWeth = hybridRelay.claim(WETH, treasury);
+    assertGt(aliceWeth, 0, 'alice claims a non-zero reward in the new output token');
+    assertApproxEqAbs(aliceWeth + treasuryWeth, wethNet, wethDust, 'holders claim the WETH net');
+    assertEq(IERC20(WETH).balanceOf(alice), aliceWeth, 'alice receives the claimed WETH');
+
+    // --- User exit: Alice queues her full principal and the drain settles it into a freshly minted sAERO,
+    //     burning her PT/YT pair and clearing the queue.
+    uint256 mintSentinel = hybridRelay.MINT_SENTINEL();
+    vm.prank(alice);
+    hybridRelay.registerOnWithdrawQueue(aliceShares, mintSentinel);
+    assertEq(hybridRelay.escrowedShares(alice), aliceShares, 'the full exit escrows the pair');
+
+    vm.prank(keeper);
+    hybridRelay.processWithdrawals(1);
+    assertEq(hybridRelay.escrowedShares(alice), 0, 'the drain releases the escrow');
+    assertEq(hybridRelay.pendingWithdrawalShares(), 0, 'no exit shares remain pending');
+    assertEq(hybridPT.balanceOf(alice), 0, 'the exit burns the principal');
+    assertEq(hybridYT.balanceOf(alice), 0, 'the exit burns the yield');
+    (,, uint40 queueCount) = hybridRelay.withdrawQueue();
+    assertEq(queueCount, 0, 'the withdraw queue drains empty');
   }
 
   function _swapParams(
