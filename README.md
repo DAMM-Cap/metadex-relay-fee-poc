@@ -46,7 +46,7 @@ forge test --match-path test/RelayFeePoc.t.sol -vv
 forge test --match-path test/RelayFeePoc.t.sol --gas-report
 ```
 
-The twenty-five tests cover all three entrypoints: the complete NFT-deposit → configured-entrypoint → Relay flow; cash-fee settlement with net pro-rata claims; fee-in-TOKEN with net compounding; all four hybrid idle/swap settlement paths; owner-controlled recipient rotation; unauthorized, zero-recipient, keeper, empty-balance, fee-cap, wrong-bound-Relay, and cross-Relay role guards; parity with Dromos `SingleConverter`/`Compounder` at 0 bps; repeated reward rounds with consistent cross-round accounting; and approved-router output measurement, input refunds, and allowance cleanup.
+The twenty-seven tests cover all three entrypoints: the complete NFT-deposit → configured-entrypoint → Relay flow; cash-fee settlement with net pro-rata claims; fee-in-TOKEN with net compounding; all four hybrid idle/swap settlement paths; the hybrid target set gating the convert output token both before and after an owner-driven retarget; a full L2 hybrid lifecycle that deposits a user, converts idle USDC, switches the convert output token to WETH (target set plus reward registry), converts idle WETH, claims valid pro-rata rewards in both the pre- and post-switch tokens, and exits the user through the withdraw queue; owner-controlled recipient rotation; unauthorized, zero-recipient, keeper, empty-balance, fee-cap, wrong-bound-Relay, and cross-Relay role guards; parity with Dromos `SingleConverter`/`Compounder` at 0 bps; repeated reward rounds with consistent cross-round accounting; and approved-router output measurement, input refunds, and allowance cleanup.
 
 Observed on the pinned fork:
 
